@@ -1,10 +1,15 @@
 #include <SPI.h>
 #include <EthernetENC.h>
 #include <WiFi.h>
+#include <Preferences.h>
 
 #define LED (2)
 
 #define RECV_TIMEOUT (1000)
+
+// Keys for preferences
+#define KEY_SSID      "ssid"
+#define KEY_PASSWORD  "password"
 
 // status word 1
 #define POWER_ON_STATUS     (0x8000)
@@ -80,20 +85,19 @@
 #define INFO_NAV_MENUDOWN   "MENUDOWN"
 
 #define INFO_BUTTON         "INFObutton"
+#define INFO_KNOB           "INFOknob"
 
 #define INFO_KNOB_PHASE         "R PHASE"
 #define INFO_KNOB_CHROMA        "R CHROMA"
 #define INFO_KNOB_BRIGHTNESS    "R BRIGHTNESS"
 #define INFO_KNOB_CONTRAST      "R CONTRAST"
 
-#define INFO_KNOB           "INFOknob"
+// Global variables
+byte mac[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED };
 
-byte mac[] = {
-  0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED
-};
+bool settingUp = false;
 
-const char* ssid = "<ssid>";
-const char* password = "<psk>";
+Preferences preferences;
 
 #define MONITOR_PORT (53484)
 
@@ -101,6 +105,7 @@ IPAddress ip(192,168,0,100);
 IPAddress monitorIP(192,168,0,1);
 
 const uint8_t get_status[31] = { 0x03,0x0b,0x53,0x4f,0x4e,0x59,0x00,0x00,0x00,0xb0,0x00,0x00,0x12,0x53,0x54,0x41,0x54,0x67,0x65,0x74,0x20,0x43,0x55,0x52,0x52,0x45,0x4e,0x54,0x20,0x35,0x00 };
+
 uint8_t status_response[53];
 
 EthernetClient monitorClient;
@@ -194,7 +199,7 @@ uint8_t sendStatusButtonTogglePacket(const char* button) {
 
 void turnKnob(Knobs knob, int8_t dir, uint8_t ticks) {
     uint8_t dataLength = sizeof(header)-1;
-    char *knobstr = NULL;
+    const char *knobstr = NULL;
 
     snprintf(knobStatus,20,"96/%d/%d",dir,ticks);
 
@@ -354,7 +359,7 @@ void addInfoButton(String& content, const char* command, const char* name, bool 
   content += "</button>";
 }
 
-void addBool(String& content, char* key, bool val, bool last = false) {
+void addBool(String& content, const char* key, bool val, bool last = false) {
     content += "\"";
     content += key;
     content += "\":";
@@ -403,7 +408,7 @@ void addStatus(String& content) {
   content += "\n}\n";  
 }
 
-void addKnob(String& content,char* name) {
+void addKnob(String& content, const char* name) {
   content += "<div class='knobdiv'>\n";
   content += "<input id='";
   content += name;
@@ -417,7 +422,7 @@ void addKnob(String& content,char* name) {
   content += "\",false)'>-</button>\n";
   content += "<button class='knobmod' onclick='turnKnob(\"";
   content += name;
-  content += "\",true)'>+</button>" \    
+  content += "\",true)'>+</button>" \
     "</div>\n";
 }
 
@@ -455,7 +460,7 @@ uint8_t handleReq(WiFiClient& client, String& url) {
       "   remotediv.style.visibility='visible';\n" \
       " } else {\n" \
       "   remotediv.style.visibility='hidden';\n" \
-      " }\n" \          
+      " }\n" \
       " for(const key in currentState.buttonStates) {\n" \
       "   let elem = document.getElementById(key);\n" \
       "   if(elem !== undefined && elem != null) {\n" \
@@ -500,7 +505,7 @@ uint8_t handleReq(WiFiClient& client, String& url) {
     content += \
       "function turnKnob(knob,positive) {\n" \
       "  let val = document.getElementById(knob);\n" \
-      "  let factor = document.getElementById(knob+'-factor');\n" \ 
+      "  let factor = document.getElementById(knob+'-factor');\n" \
       "  var xhttp = new XMLHttpRequest();\n" \
       "  xhttp.open('GET', '";
     content += knobURL;
@@ -521,7 +526,7 @@ uint8_t handleReq(WiFiClient& client, String& url) {
       ".active { color: white; background-color: limegreen; }\n" \
       ".buttondiv { display: inline-block; margin: 5px; vertical-align: top; }\n" \
       "</style>\n";
-    content += "</html>\n";
+    content += "</head>\n";
     content += "<body>\n";
     content += "<div>\n";
     content += "BKM-15R remote\n";
@@ -605,7 +610,7 @@ uint8_t handleReq(WiFiClient& client, String& url) {
     client.println("Content-Type: text/html");
     client.print("Content-Length: ");
     client.println(content.length());
-    client.println("Connection: close");  // the connection will be closed after completion of the response
+    client.println("Connection: close");
     client.println();
     client.println(content);
   } else if(url.startsWith(toggleURL)) {
@@ -706,7 +711,7 @@ uint8_t handleReq(WiFiClient& client, String& url) {
         Serial.print("Failed deciphering knob request '");
         Serial.println(url);
         client.println("HTTP/1.1 404 Not Found");
-        client.println("Connection: close");  // the connection will be closed after completion of the response    
+        client.println("Connection: close");    
       }      
     } else {
       client.println("HTTP/1.1 503 Service Unavailable");
@@ -715,7 +720,7 @@ uint8_t handleReq(WiFiClient& client, String& url) {
     }      
   } else {
     client.println("HTTP/1.1 404 Not Found");
-    client.println("Connection: close");  // the connection will be closed after completion of the response    
+    client.println("Connection: close");    
   }
   return rv;
 }
@@ -822,48 +827,85 @@ void statusLEDBlinker( void * pvParameters ){
   }
 }
 
+IPAddress ap_ip(192,168,4,1);
+IPAddress ap_gw(192,168,4,1);
+IPAddress ap_subnet(255,255,255,0);
+ 
 void setup() {
   pinMode(LED,OUTPUT);
-  Serial.begin(115200);
-  Serial.println("Initializing ethernet");
-  Ethernet.init(5);
-  Ethernet.begin(mac, ip);
 
-  if (Ethernet.hardwareStatus() == EthernetNoHardware) {
-    while (true) {
-      digitalWrite(LED,HIGH);
-      delay(100);
+  char* ssid = NULL;
+  char* password = NULL;
+
+  preferences.begin("credentials");
+  if(!preferences.isKey(KEY_SSID)) {
+    settingUp = true;
+  } else {
+    preferences.getString(KEY_SSID,ssid,50);
+    if(preferences.isKey(KEY_PASSWORD)) {
+      preferences.getString(KEY_PASSWORD,password,80);
     }
   }
+  preferences.end();
 
-  state_sem = xSemaphoreCreateMutex();
+  Serial.begin(115200);
 
-  WiFi.setHostname("BKM-15R");
+  if(settingUp) {
 
-  WiFi.begin(ssid, password);
+    Serial.println("Starting Setup Access Point:");
+    Serial.print("Config: ");    
+    Serial.println(WiFi.softAPConfig(ap_ip, ap_gw, ap_subnet) ? "OK" : "Failed!");
+    Serial.print("Startup: ");    
+    Serial.println(WiFi.softAP("BKM-15R-Setup", "adminadmin", 6, false) ? "OK" : "Failed!");
+    Serial.print("AP IP address: ");
+    Serial.println(WiFi.softAPIP());
+    Serial.print("MAC: ");
+    Serial.println(WiFi.softAPmacAddress());
+    
+    webServer.begin();
+  } else {
+    Serial.println("Initializing ethernet");
+    Ethernet.init(5);
+    Ethernet.begin(mac, ip);
+    
+    if (Ethernet.hardwareStatus() == EthernetNoHardware) {
+      while (true) {
+        digitalWrite(LED,HIGH);
+        delay(100);
+      }
+    }
+    
+    state_sem = xSemaphoreCreateMutex();
+    
+    WiFi.setHostname("BKM-15R");
 
-  Serial.println("Connecting to WiFi");
-  while (WiFi.status() != WL_CONNECTED) {
-      digitalWrite(LED,HIGH);
-      delay(100);
-      digitalWrite(LED,LOW);
-      delay(500);
+    WiFi.begin(ssid, password != NULL ? password : "");
+    
+    Serial.print("Connecting to SSID '");
+    Serial.print(ssid);
+    Serial.println("'");
+    while (WiFi.status() != WL_CONNECTED) {
+        digitalWrite(LED,HIGH);
+        delay(100);
+        digitalWrite(LED,LOW);
+        delay(500);
+    }
+    memcpy(packetBuf,header,sizeof(header));
+    
+    currentState.m_linkUp = (Ethernet.linkStatus() == LinkON);
+    commandQueue.m_queueLen = 0;
+    statusWaiters.m_waiterCnt = 0;
+    knobActions.m_actionCnt = 0;
+    
+    Serial.println("Starting WebServer");
+    webServer.begin();
+    
+    Serial.println(WiFi.localIP());
+    
+    //create a task to run the webserver stuff on core 0, as core 1 is default
+    xTaskCreatePinnedToCore(webserverHandler, "Webserver", 10000, NULL, 1, &webServerTask, 0);
+    xTaskCreatePinnedToCore(statusLEDBlinker, "LED Blinker", 1000, NULL, 2, &ledTask, 0);
   }
-  memcpy(packetBuf,header,sizeof(header));
-
-  currentState.m_linkUp = (Ethernet.linkStatus() == LinkON);
-  commandQueue.m_queueLen = 0;
-  statusWaiters.m_waiterCnt = 0;
-  knobActions.m_actionCnt = 0;
-
-  Serial.println("Starting WebServer");
-  webServer.begin();
-
-  Serial.println(WiFi.localIP());
-  
-  //create a task to run the webserver stuff on core 0, as core 1 is default
-  xTaskCreatePinnedToCore(webserverHandler, "Webserver", 10000, NULL, 1, &webServerTask, 0);
-  xTaskCreatePinnedToCore(statusLEDBlinker, "LED Blinker", 1000, NULL, 2, &ledTask, 0);
 }
 
 unsigned long lastStatusUpdate_ms = 0;
@@ -947,96 +989,243 @@ void updateStatus() {
   }  
 }
 
-void loop() {
-  if(Ethernet.linkStatus() == LinkOFF) {
-    if(monitorClient.connected()) monitorClient.stop();
-    xSemaphoreTake(state_sem, portMAX_DELAY);
-    currentState.m_linkUp = false;
+void connectMonitor() {
+  Serial.println("Connecting to monitor...");
+  statusw1 = 0xFFFF;
+  statusw2 = 0xFFFF;
+  statusw3 = 0xFFFF;
+  statusw4 = 0xFFFF;
+  statusw5 = 0xFFFF;
+  _statusw1 = 0xFFFF;
+  _statusw2 = 0xFFFF;
+  _statusw3 = 0xFFFF;
+  _statusw4 = 0xFFFF;
+  _statusw5 = 0xFFFF;
+  xSemaphoreTake(state_sem, portMAX_DELAY);
+  if(currentState.m_connected) {
     currentState.m_connected = false;
     currentState.m_isValid = false;
         statusUpdated = true;
-    xSemaphoreGive(state_sem);
-
-    Serial.println("Link is down, waiting for it to come up...");
-    while (Ethernet.linkStatus() == LinkOFF) {
-      delay(500);
-    }
-    delay(1000); // dunno, apparently give the ethernet a chance to live...
-
-    Serial.println("Link is now up!");
-
-    xSemaphoreTake(state_sem, portMAX_DELAY);
-    currentState.m_linkUp = true;
-    statusUpdated = true;
-    xSemaphoreGive(state_sem);
   }
+  xSemaphoreGive(state_sem);
+  int rv = 0;
+  while(rv != 1) {
+    rv = monitorClient.connect(monitorIP,MONITOR_PORT);
+    if(rv != 1) delay(1000);
+  }
+  xSemaphoreTake(state_sem, portMAX_DELAY);
+  currentState.m_connected = true;
+  statusUpdated = true;
+  xSemaphoreGive(state_sem);
+  Serial.println("Connected, flushing...");
+  monitorClient.flush();
+  Serial.println("Starting communication...");
+  updateStatus();
+  lastStatusUpdate_ms = millis();
+}
 
-  if(!monitorClient.connected()) {
-    Serial.println("Connecting to monitor...");
-    statusw1 = 0xFFFF;
-    statusw2 = 0xFFFF;
-    statusw3 = 0xFFFF;
-    statusw4 = 0xFFFF;
-    statusw5 = 0xFFFF;
-    _statusw1 = 0xFFFF;
-    _statusw2 = 0xFFFF;
-    _statusw3 = 0xFFFF;
-    _statusw4 = 0xFFFF;
-    _statusw5 = 0xFFFF;
-    xSemaphoreTake(state_sem, portMAX_DELAY);
-    if(currentState.m_connected) {
-      currentState.m_connected = false;
-      currentState.m_isValid = false;
-          statusUpdated = true;
-    }
-    xSemaphoreGive(state_sem);
-    int rv = 0;
-    while(rv != 1) {
-      rv = monitorClient.connect(monitorIP,MONITOR_PORT);
-      if(rv != 1) delay(1000);
-    }
-    xSemaphoreTake(state_sem, portMAX_DELAY);
-    currentState.m_connected = true;
-    statusUpdated = true;
-    xSemaphoreGive(state_sem);
-    Serial.println("Connected, flushing...");
-    monitorClient.flush();
-    Serial.println("Starting communication...");
-    updateStatus();
-    lastStatusUpdate_ms = millis();
+void waitLink() {
+  if(monitorClient.connected()) monitorClient.stop();
+  xSemaphoreTake(state_sem, portMAX_DELAY);
+  currentState.m_linkUp = false;
+  currentState.m_connected = false;
+  currentState.m_isValid = false;
+      statusUpdated = true;
+  xSemaphoreGive(state_sem);
+
+  Serial.println("Link is down, waiting for it to come up...");
+  while (Ethernet.linkStatus() == LinkOFF) {
+    delay(500);
+  }
+  delay(1000); // dunno, apparently give the ethernet a chance to live...
+
+  Serial.println("Link is now up!");
+
+  xSemaphoreTake(state_sem, portMAX_DELAY);
+  currentState.m_linkUp = true;
+  statusUpdated = true;
+  xSemaphoreGive(state_sem);
+}
+
+void addWifiNetworks() {
+  int ssidsFound = WiFi.scanNetworks();
+  if (ssidsFound == -1) {
+    Serial.println("Failure scanning for WiFi networks");
   } else {
-    Command_t* cmd = NULL;
-    KnobAction_t* knobAction = NULL;
-    xSemaphoreTake(state_sem, portMAX_DELAY);
-    if(commandQueue.m_queueLen > 0) {
-      cmd = &commandQueue.m_commands[commandQueue.m_queueLen-1];
-      commandQueue.m_queueLen--;
+    // print the list of networks seen:
+    Serial.print("Found ");
+    Serial.print(ssidsFound);
+    Serial.println(" SSID(s)");
+  
+    // print the network number and name for each network found:
+    for (int ssidNo = 0; ssidNo < ssidsFound; ssidNo++) {
+      Serial.print(ssidNo);
+      Serial.print(") ");
+      Serial.print(WiFi.SSID(ssidNo));
+      Serial.print("\tSignal: ");
+      Serial.print(WiFi.RSSI(ssidNo));
+      Serial.print(" dBm");
     }
-    if(knobActions.m_actionCnt > 0) {
-      knobAction = &(knobActions.m_actions[knobActions.m_actionCnt-1]);
-      knobActions.m_actionCnt--;
-    }    
-    xSemaphoreGive(state_sem);        
+  }
+}
+const char contentlengthstr[] = "Content-Length: ";
 
-    if(NULL != cmd) {
-      switch(cmd->m_commandType) {
-        case CT_INFO:
-          sendInfoButtonPacket(cmd->m_command);
-        break;
-        case CT_STATUS:
-          sendStatusButtonTogglePacket(cmd->m_command);
-        break;
+void setupSystem() {
+  WiFiClient setupClient = webServer.available();
+  if (setupClient) {
+    // a http request ends with a blank line
+    String str;
+    int contentLength = 0;
+    WebRequest_t req;
+    bool done = false;
+    Serial.println("Setup client connected\n");
+    while (setupClient.connected()) {
+      while (setupClient.available()) {
+        char c = setupClient.read();
+        str += c;
+        if(c == '\n') {
+          if(str == "\r\n") {
+            if(contentLength != 0) {
+              int bytesRead = 0;
+              while (setupClient.available() < contentLength) delay(1);
+              while(bytesRead < contentLength) {
+                c = setupClient.read();
+                req.m_content += c;
+                ++bytesRead;
+              }
+            }
+            if(req.m_URL == "/") {
+              String content;
+              content += "<!DOCTYPE HTML>\n";
+              content += "<html>\n";
+              content += "<head>\n";
+              content += "<title>BKM-15R Setup</title>\n";
+              content += "<script>\n";
+              content += \
+                "function sendSetup() {\n" \
+                "  let msg = '';\n" \
+                "  let ssidelem = document.getElementById('wifissid');\n" \
+                "  msg = '{\\n\"ssid\":\"'+ssidelem.value+'\",\\n';\n" \
+                "  let pskelem = document.getElementById('wifipsk');\n" \
+                "  msg += '\"psk\":\"'+pskelem.value+'\"\\n}';\n" \
+                "  var xhttp = new XMLHttpRequest();\n" \
+                "  xhttp.open('POST', '";
+              content += "/setup";
+              content += "', true);\n" \
+                "  xhttp.setRequestHeader('Content-type', 'application/json');\n" \
+                "  xhttp.send(msg);\n" \
+                "};\n";
+              content += "</script>\n";
+              content += "<body>\n";
+              content += "BKM-15R remote setup<br>\n";
+              content += "<span>SSID:</span><input id='wifissid'><br>\n";
+              content += "<span>PSK:</span><input id='wifipsk' type='password'><br>\n";
+              content += "<button onclick='sendSetup()'>Send</button><br>\n";
+              content += "<p>Pressing 'Send' will save credentials, and restart...</p>\n";
+              content += "</body>\n";
+              content += "</html>\n";
+              // send a standard http response header
+              setupClient.println("HTTP/1.1 200 OK");
+              setupClient.println("Content-Type: text/html");
+              setupClient.print(contentlengthstr);
+              setupClient.println(content.length());
+              setupClient.println("Connection: close");
+              setupClient.println();
+              setupClient.println(content);
+            } else if (req.m_URL == "/setup") {
+              int b = req.m_content.indexOf(':');
+              int p = req.m_content.indexOf('\"',b);
+/*                preferences.begin("credentials");
+                preferences.putString(KEY_SSID,
+                if(!preferences.isKey(KEY_SSID)) {
+                  settingUp = true;
+                } else {
+                  preferences.getString(KEY_SSID,ssid,50);
+                  if(preferences.isKey(KEY_PASSWORD)) {
+                    preferences.getString(KEY_PASSWORD,password,80);
+                  }
+                }
+                preferences.end();*/
+              //ESP.restart();
+              setupClient.println("HTTP/1.1 200 OK");
+              setupClient.println("Content-Type: none");
+              setupClient.println("Connection: close");
+            } else {
+              setupClient.println("HTTP/1.1 404 Not Found");
+              setupClient.println("Connection: close");   
+            }
+            done = true;
+            break;
+          } else {
+            Serial.println(str);
+            if(str.startsWith(contentlengthstr)) {
+              req.m_content = "";
+              String cl = str.substring(strlen(contentlengthstr),str.indexOf('\r'));
+              contentLength = cl.toInt();
+            }
+            if(str.startsWith("GET")) {
+              str = str.substring(4,str.indexOf(' ',4));
+              req.m_URL = str;
+            }
+            if(str.startsWith("POST")) {
+              str = str.substring(5,str.indexOf(' ',5));
+              req.m_URL = str;
+            }
+          }
+          str = "";
+        }
+      }
+      if(done) break;
+      delay(1);
+    }
+    Serial.println("Disconnecting setup client");
+    setupClient.flush();
+    setupClient.stop();
+  }
+}
+
+void loop() {
+  if(!settingUp) {
+    if(Ethernet.linkStatus() == LinkOFF) waitLink();
+    
+    if(!monitorClient.connected()) {
+      connectMonitor();
+    } else {
+      Command_t* cmd = NULL;
+      KnobAction_t* knobAction = NULL;
+      xSemaphoreTake(state_sem, portMAX_DELAY);
+      if(commandQueue.m_queueLen > 0) {
+        cmd = &commandQueue.m_commands[commandQueue.m_queueLen-1];
+        commandQueue.m_queueLen--;
+      }
+      if(knobActions.m_actionCnt > 0) {
+        knobAction = &(knobActions.m_actions[knobActions.m_actionCnt-1]);
+        knobActions.m_actionCnt--;
+      }    
+      xSemaphoreGive(state_sem);        
+    
+      if(NULL != cmd) {
+        switch(cmd->m_commandType) {
+          case CT_INFO:
+            sendInfoButtonPacket(cmd->m_command);
+          break;
+          case CT_STATUS:
+            sendStatusButtonTogglePacket(cmd->m_command);
+          break;
+        }
+      }
+    
+      if(NULL != knobAction) {
+        turnKnob(knobAction->m_knob,knobAction->m_factor * (knobAction->m_positive ? 1 : -1),knobAction->m_value);
+      }
+    
+      if(millis() >= lastStatusUpdate_ms + 150) {
+        updateStatus();
+        lastStatusUpdate_ms = millis();
       }
     }
-
-    if(NULL != knobAction) {
-      turnKnob(knobAction->m_knob,knobAction->m_factor * (knobAction->m_positive ? 1 : -1),knobAction->m_value);
-    }
-
-    if(millis() >= lastStatusUpdate_ms + 150) {
-      updateStatus();
-      lastStatusUpdate_ms = millis();
-    }
+    delay(10);
+  } else {
+    setupSystem();
   }
-  delay(10);
 }
