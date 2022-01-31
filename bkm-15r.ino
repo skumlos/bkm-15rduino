@@ -4,6 +4,8 @@
 
 #define LED (2)
 
+#define RECV_TIMEOUT (1000)
+
 // status word 1
 #define POWER_ON_STATUS     (0x8000)
 #define SCANMODE_STATUS     (0x0400)
@@ -134,6 +136,7 @@ const char header [13] = { 0x03, 0x0B, 'S', 'O', 'N', 'Y', 0x00, 0x00, 0x00, 0xB
 
 uint8_t button_response[13];
 uint8_t packetBuf[40];
+int wait_ms = 0;
 
 uint8_t sendInfoButtonPacket(const char* button) {
     uint8_t dataLength = sizeof(header)-1;
@@ -145,7 +148,14 @@ uint8_t sendInfoButtonPacket(const char* button) {
     dataLength += strlen(button);
     packetBuf[dataLength++] = 0x20;
     if(monitorClient.write(packetBuf, dataLength) == dataLength) {
-      while(monitorClient.available() < sizeof(button_response)) delay(1);
+      wait_ms = 0;
+      while(monitorClient.available() < sizeof(button_response)) {
+        delay(1);
+        ++wait_ms;
+        if(wait_ms >= RECV_TIMEOUT) break;
+      }
+      if(wait_ms >= RECV_TIMEOUT) return 1;
+
       uint8_t bytesRead = 0;
       while(bytesRead < sizeof(button_response))
         button_response[bytesRead++] = monitorClient.read();
@@ -166,7 +176,14 @@ uint8_t sendStatusButtonTogglePacket(const char* button) {
     memcpy(packetBuf+dataLength, TOGGLE, strlen(TOGGLE));
     dataLength += strlen(TOGGLE);
     if(monitorClient.write(packetBuf, dataLength) == dataLength) {
-      while(monitorClient.available() < sizeof(button_response)) delay(1);
+      wait_ms = 0;
+      while(monitorClient.available() < sizeof(button_response)) {
+        delay(1);
+        ++wait_ms;
+        if(wait_ms >= RECV_TIMEOUT) break;
+      }
+      if(wait_ms >= RECV_TIMEOUT) return 1;
+      
       uint8_t bytesRead = 0;
       while(bytesRead < sizeof(button_response))
         button_response[bytesRead++] = monitorClient.read();
@@ -207,7 +224,13 @@ void turnKnob(Knobs knob, int8_t dir, uint8_t ticks) {
     memcpy(packetBuf+dataLength, knobStatus, strlen(knobStatus));
     dataLength += strlen(knobStatus);
     if(monitorClient.write(packetBuf, dataLength) == dataLength) {
-      while(monitorClient.available() < sizeof(button_response)) delay(1);
+      wait_ms = 0;
+      while(monitorClient.available() < sizeof(button_response)) {
+        delay(1);
+        ++wait_ms;
+        if(wait_ms >= RECV_TIMEOUT) break;
+      }
+      if(wait_ms >= RECV_TIMEOUT) return;
       uint8_t bytesRead = 0;
       while(bytesRead < sizeof(button_response))
         button_response[bytesRead++] = monitorClient.read();
@@ -217,6 +240,7 @@ void turnKnob(Knobs knob, int8_t dir, uint8_t ticks) {
 }
 
 TaskHandle_t webServerTask;
+TaskHandle_t ledTask;
 
 SemaphoreHandle_t state_sem;
 
@@ -269,14 +293,20 @@ typedef struct {
   uint8_t m_queueLen;  
 } CommandQueue_t;
 
+bool statusUpdated = false;
+
+uint16_t statusw1 = 0xFFFF,_statusw1 = 0xFFFF;
+uint16_t statusw2 = 0xFFFF,_statusw2 = 0xFFFF;
+uint16_t statusw3 = 0xFFFF,_statusw3 = 0xFFFF;
+uint16_t statusw4 = 0xFFFF,_statusw4 = 0xFFFF;
+uint16_t statusw5 = 0xFFFF,_statusw5 = 0xFFFF;
+
 typedef struct {
   // when was the waiter added
   unsigned long m_addTick_ms;
   // the associated connection
   WiFiClient m_client;  
 } StatusWaiter_t;
-
-bool statusUpdated = false;
 
 #define MAX_WAITERS (4)
 
@@ -286,12 +316,6 @@ typedef struct {
 } StatusWaiters_t;
 
 StatusWaiters_t statusWaiters;
-
-uint16_t statusw1 = 0xFFFF,_statusw1 = 0xFFFF;
-uint16_t statusw2 = 0xFFFF,_statusw2 = 0xFFFF;
-uint16_t statusw3 = 0xFFFF,_statusw3 = 0xFFFF;
-uint16_t statusw4 = 0xFFFF,_statusw4 = 0xFFFF;
-uint16_t statusw5 = 0xFFFF,_statusw5 = 0xFFFF;
 
 const char toggleURL[]      = "/toggle/";
 const char knobURL[]        = "/turnknob/";
@@ -764,6 +788,40 @@ void webserverHandler( void * pvParameters ){
   }
 }
 
+void statusLEDBlinker( void * pvParameters ){
+  while(true) {
+    if(!currentState.m_linkUp) {
+      digitalWrite(LED,HIGH);
+      delay(100);
+      digitalWrite(LED,LOW);
+      delay(100);
+      digitalWrite(LED,HIGH);
+      delay(100);
+      digitalWrite(LED,LOW);
+      delay(1000);
+    } else if(!currentState.m_connected) {
+      digitalWrite(LED,HIGH);
+      delay(100);
+      digitalWrite(LED,LOW);             
+      delay(100);
+      digitalWrite(LED,HIGH);
+      delay(100);
+      digitalWrite(LED,LOW);
+      delay(100);
+      digitalWrite(LED,HIGH);
+      delay(100);
+      digitalWrite(LED,LOW);
+      delay(1000);
+    } else {
+      digitalWrite(LED,HIGH);
+      delay(200);
+      digitalWrite(LED,LOW);      
+      delay(200);
+      digitalWrite(LED,LOW);      
+    }
+  }
+}
+
 void setup() {
   pinMode(LED,OUTPUT);
   Serial.begin(115200);
@@ -805,6 +863,88 @@ void setup() {
   
   //create a task to run the webserver stuff on core 0, as core 1 is default
   xTaskCreatePinnedToCore(webserverHandler, "Webserver", 10000, NULL, 1, &webServerTask, 0);
+  xTaskCreatePinnedToCore(statusLEDBlinker, "LED Blinker", 1000, NULL, 2, &ledTask, 0);
+}
+
+unsigned long lastStatusUpdate_ms = 0;
+
+void updateStatus() {
+  monitorClient.write(get_status,sizeof(get_status));
+  int wait_ms = 0;
+  while(monitorClient.available() < sizeof(status_response)) {
+    delay(1);
+    ++wait_ms;
+    if(wait_ms >= RECV_TIMEOUT) break;
+  }
+  if(wait_ms >= RECV_TIMEOUT) return;
+  
+  uint8_t bytesRead = 0;
+  while(bytesRead < sizeof(status_response))
+    status_response[bytesRead++] = monitorClient.read();
+
+  statusw1 =  ((status_response[29] - 0x30) << 12) +
+              ((status_response[30] - 0x30) << 8) +
+              ((status_response[31] - 0x30) << 4) +
+              ((status_response[32] - 0x30));
+
+  statusw2 =  ((status_response[34] - 0x30) << 12) +
+              ((status_response[35] - 0x30) << 8) +
+              ((status_response[36] - 0x30) << 4) +
+              ((status_response[37] - 0x30));
+
+  statusw3 =  ((status_response[39] - 0x30) << 12) +
+              ((status_response[40] - 0x30) << 8) +
+              ((status_response[41] - 0x30) << 4) +
+              ((status_response[42] - 0x30));
+
+  statusw4 =  ((status_response[44] - 0x30) << 12) +
+              ((status_response[45] - 0x30) << 8) +
+              ((status_response[46] - 0x30) << 4) +
+              ((status_response[47] - 0x30));
+
+  statusw5 =  ((status_response[49] - 0x30) << 12) +
+              ((status_response[50] - 0x30) << 8) +
+              ((status_response[51] - 0x30) << 4) +
+              ((status_response[52] - 0x30));
+
+  if(statusw1 != _statusw1 || statusw2 != _statusw2 ||
+      statusw3 != _statusw3 || statusw4 != _statusw4 ||
+      statusw5 != _statusw5)
+  {
+      xSemaphoreTake(state_sem, portMAX_DELAY);
+      currentState.m_isPowered =  (statusw1 & POWER_ON_STATUS);
+      currentState.m_scanmode =   (statusw1 & SCANMODE_STATUS);
+      currentState.m_hdelay =     (statusw1 & HDELAY_STATUS);
+      currentState.m_vdelay =     (statusw1 & VDELAY_STATUS);
+      currentState.m_monochrome = (statusw1 & MONOCHROME_STATUS);
+      currentState.m_charmute =   (statusw1 & CHAR_MUTE_STATUS);
+      currentState.m_marker =     (statusw1 & MARKER_MODE_STATUS);
+      currentState.m_extsync =    (statusw1 & EXTSYNC_STATUS);
+      currentState.m_apt =        (statusw1 & APT_STATUS);
+      currentState.m_chromaup =   (statusw1 & CHROMA_UP_STATUS);
+      currentState.m_aspect =     (statusw1 & ASPECT_STATUS);
+
+      currentState.m_coltemp =    (statusw3 & COL_TEMP_STATUS);
+      currentState.m_comb =       (statusw3 & COMB_STATUS);
+      currentState.m_blueonly =   (statusw3 & BLUE_ONLY_STATUS);
+      currentState.m_rcutoff =    (statusw3 & R_CUTOFF_STATUS);
+      currentState.m_gcutoff =    (statusw3 & G_CUTOFF_STATUS);
+      currentState.m_bcutoff =    (statusw3 & B_CUTOFF_STATUS);
+
+      currentState.m_man_phase =    (statusw4 & MAN_PHASE_STATUS);
+      currentState.m_man_chroma =   (statusw4 & MAN_CHROMA_STATUS);
+      currentState.m_man_bright =   (statusw4 & MAN_BRIGHT_STATUS);
+      currentState.m_man_contrast = (statusw4 & MAN_CONTRAST_STATUS);
+      
+      currentState.m_isValid = true;
+      statusUpdated = true;
+      xSemaphoreGive(state_sem);
+      _statusw1 = statusw1;
+      _statusw2 = statusw2;
+      _statusw3 = statusw3;
+      _statusw4 = statusw4;
+      _statusw5 = statusw5;
+  }  
 }
 
 void loop() {
@@ -819,14 +959,7 @@ void loop() {
 
     Serial.println("Link is down, waiting for it to come up...");
     while (Ethernet.linkStatus() == LinkOFF) {
-        digitalWrite(LED,HIGH);
-        delay(100);
-        digitalWrite(LED,LOW);
-        delay(100);
-        digitalWrite(LED,HIGH);
-        delay(100);
-        digitalWrite(LED,LOW);
-        delay(1000);
+      delay(500);
     }
     delay(1000); // dunno, apparently give the ethernet a chance to live...
 
@@ -860,11 +993,7 @@ void loop() {
     int rv = 0;
     while(rv != 1) {
       rv = monitorClient.connect(monitorIP,MONITOR_PORT);
-      if(rv != 1) {
-        digitalWrite(LED,HIGH);
-        delay(100);
-        digitalWrite(LED,LOW);             
-      }
+      if(rv != 1) delay(1000);
     }
     xSemaphoreTake(state_sem, portMAX_DELAY);
     currentState.m_connected = true;
@@ -873,6 +1002,8 @@ void loop() {
     Serial.println("Connected, flushing...");
     monitorClient.flush();
     Serial.println("Starting communication...");
+    updateStatus();
+    lastStatusUpdate_ms = millis();
   } else {
     Command_t* cmd = NULL;
     KnobAction_t* knobAction = NULL;
@@ -902,78 +1033,10 @@ void loop() {
       turnKnob(knobAction->m_knob,knobAction->m_factor * (knobAction->m_positive ? 1 : -1),knobAction->m_value);
     }
 
-    monitorClient.write(get_status,sizeof(get_status));
-    while(monitorClient.available() < sizeof(status_response)) delay(1);
-    uint8_t bytesRead = 0;
-    while(bytesRead < sizeof(status_response))
-      status_response[bytesRead++] = monitorClient.read();
-
-    statusw1 =  ((status_response[29] - 0x30) << 12) +
-                ((status_response[30] - 0x30) << 8) +
-                ((status_response[31] - 0x30) << 4) +
-                ((status_response[32] - 0x30));
-
-    statusw2 =  ((status_response[34] - 0x30) << 12) +
-                ((status_response[35] - 0x30) << 8) +
-                ((status_response[36] - 0x30) << 4) +
-                ((status_response[37] - 0x30));
-
-    statusw3 =  ((status_response[39] - 0x30) << 12) +
-                ((status_response[40] - 0x30) << 8) +
-                ((status_response[41] - 0x30) << 4) +
-                ((status_response[42] - 0x30));
-
-    statusw4 =  ((status_response[44] - 0x30) << 12) +
-                ((status_response[45] - 0x30) << 8) +
-                ((status_response[46] - 0x30) << 4) +
-                ((status_response[47] - 0x30));
-
-    statusw5 =  ((status_response[49] - 0x30) << 12) +
-                ((status_response[50] - 0x30) << 8) +
-                ((status_response[51] - 0x30) << 4) +
-                ((status_response[52] - 0x30));
-
-    if(statusw1 != _statusw1 || statusw2 != _statusw2 ||
-        statusw3 != _statusw3 || statusw4 != _statusw4 ||
-        statusw5 != _statusw5)
-    {
-        xSemaphoreTake(state_sem, portMAX_DELAY);
-        currentState.m_isPowered =  (statusw1 & POWER_ON_STATUS);
-        currentState.m_scanmode =   (statusw1 & SCANMODE_STATUS);
-        currentState.m_hdelay =     (statusw1 & HDELAY_STATUS);
-        currentState.m_vdelay =     (statusw1 & VDELAY_STATUS);
-        currentState.m_monochrome = (statusw1 & MONOCHROME_STATUS);
-        currentState.m_charmute =   (statusw1 & CHAR_MUTE_STATUS);
-        currentState.m_marker =     (statusw1 & MARKER_MODE_STATUS);
-        currentState.m_extsync =    (statusw1 & EXTSYNC_STATUS);
-        currentState.m_apt =        (statusw1 & APT_STATUS);
-        currentState.m_chromaup =   (statusw1 & CHROMA_UP_STATUS);
-        currentState.m_aspect =     (statusw1 & ASPECT_STATUS);
-
-        currentState.m_coltemp =    (statusw3 & COL_TEMP_STATUS);
-        currentState.m_comb =       (statusw3 & COMB_STATUS);
-        currentState.m_blueonly =   (statusw3 & BLUE_ONLY_STATUS);
-        currentState.m_rcutoff =    (statusw3 & R_CUTOFF_STATUS);
-        currentState.m_gcutoff =    (statusw3 & G_CUTOFF_STATUS);
-        currentState.m_bcutoff =    (statusw3 & B_CUTOFF_STATUS);
-
-        currentState.m_man_phase =    (statusw4 & MAN_PHASE_STATUS);
-        currentState.m_man_chroma =   (statusw4 & MAN_CHROMA_STATUS);
-        currentState.m_man_bright =   (statusw4 & MAN_BRIGHT_STATUS);
-        currentState.m_man_contrast = (statusw4 & MAN_CONTRAST_STATUS);
-        
-        currentState.m_isValid = true;
-        statusUpdated = true;
-        xSemaphoreGive(state_sem);
-        _statusw1 = statusw1;
-        _statusw2 = statusw2;
-        _statusw3 = statusw3;
-        _statusw4 = statusw4;
-        _statusw5 = statusw5;
+    if(millis() >= lastStatusUpdate_ms + 150) {
+      updateStatus();
+      lastStatusUpdate_ms = millis();
     }
   }
-  
-  digitalWrite(LED,HIGH);
-  delay(150);
-  digitalWrite(LED,LOW);
+  delay(10);
 }
