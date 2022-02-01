@@ -4,6 +4,7 @@
 #include <Preferences.h>
 
 #define LED (2)
+#define FORCE_SETUP (27)
 
 #define RECV_TIMEOUT (1000)
 
@@ -833,25 +834,34 @@ IPAddress ap_subnet(255,255,255,0);
  
 void setup() {
   pinMode(LED,OUTPUT);
-
-  char* ssid = NULL;
-  char* password = NULL;
-
-  preferences.begin("credentials");
-  if(!preferences.isKey(KEY_SSID)) {
-    settingUp = true;
-  } else {
-    preferences.getString(KEY_SSID,ssid,50);
-    if(preferences.isKey(KEY_PASSWORD)) {
-      preferences.getString(KEY_PASSWORD,password,80);
-    }
-  }
-  preferences.end();
-
+  pinMode(FORCE_SETUP,INPUT_PULLUP);
+ 
   Serial.begin(115200);
 
-  if(settingUp) {
+  Serial.println("\n\nBKM-15Rduino");
+  Serial.println("(2022) Martin Hejnfelt (martin@hejnfelt.com)");
+  Serial.println("www.immerhax.com\n\n");
 
+  String ssid = "";
+  String password = "";
+
+  if(digitalRead(FORCE_SETUP) == LOW) {
+    Serial.println("Forcing setup");
+    settingUp = true;
+  } else {
+    preferences.begin("credentials",true);
+    if(!preferences.isKey(KEY_SSID)) {
+      Serial.println("No credentials exist");
+      settingUp = true;
+    } else {
+      ssid = preferences.getString(KEY_SSID,"");
+      if(ssid == "") settingUp = true;
+      password = preferences.getString(KEY_PASSWORD,"");
+    }
+    preferences.end();
+  }
+
+  if(settingUp) {
     Serial.println("Starting Setup Access Point:");
     Serial.print("Config: ");    
     Serial.println(WiFi.softAPConfig(ap_ip, ap_gw, ap_subnet) ? "OK" : "Failed!");
@@ -879,7 +889,7 @@ void setup() {
     
     WiFi.setHostname("BKM-15R");
 
-    WiFi.begin(ssid, password != NULL ? password : "");
+    WiFi.begin(ssid.c_str(), password.c_str());
     
     Serial.print("Connecting to SSID '");
     Serial.print(ssid);
@@ -1105,10 +1115,19 @@ void setupSystem() {
                 "function sendSetup() {\n" \
                 "  let msg = '';\n" \
                 "  let ssidelem = document.getElementById('wifissid');\n" \
-                "  msg = '{\\n\"ssid\":\"'+ssidelem.value+'\",\\n';\n" \
+                "  msg = 'ssid='+ssidelem.value+'\\r\\n'\n" \
                 "  let pskelem = document.getElementById('wifipsk');\n" \
-                "  msg += '\"psk\":\"'+pskelem.value+'\"\\n}';\n" \
+                "  msg += 'psk='+pskelem.value+'\\r\\n'\n" \
                 "  var xhttp = new XMLHttpRequest();\n" \
+                "  xhttp.onreadystatechange = function() {\n" \
+                "    if (this.readyState == 4) {\n" \
+                "      if(this.status == 200) { \n" \
+                "        alert('OK');\n" \
+                "      } else if (this.status == 400) {\n" \
+                "        alert('Not accepted, try again...');\n" \
+                "      }\n" \
+                "    }\n" \
+                "  };\n" \
                 "  xhttp.open('POST', '";
               content += "/setup";
               content += "', true);\n" \
@@ -1133,23 +1152,27 @@ void setupSystem() {
               setupClient.println();
               setupClient.println(content);
             } else if (req.m_URL == "/setup") {
-              int b = req.m_content.indexOf(':');
-              int p = req.m_content.indexOf('\"',b);
-/*                preferences.begin("credentials");
-                preferences.putString(KEY_SSID,
-                if(!preferences.isKey(KEY_SSID)) {
-                  settingUp = true;
-                } else {
-                  preferences.getString(KEY_SSID,ssid,50);
-                  if(preferences.isKey(KEY_PASSWORD)) {
-                    preferences.getString(KEY_PASSWORD,password,80);
-                  }
-                }
-                preferences.end();*/
-              //ESP.restart();
-              setupClient.println("HTTP/1.1 200 OK");
-              setupClient.println("Content-Type: none");
-              setupClient.println("Connection: close");
+              int b = req.m_content.indexOf('=');
+              int p = req.m_content.indexOf("\r\n",b+1);
+              String ssid = req.m_content.substring(b+1,p); 
+              b = req.m_content.indexOf('=',p+1);
+              p = req.m_content.indexOf("\r\n",b+1);
+              String psk = req.m_content.substring(b+1,p); 
+              if(ssid != "") {
+                setupClient.println("HTTP/1.1 200 OK");
+                setupClient.println("Content-Type: none");
+                setupClient.println("Connection: close");
+                preferences.begin("credentials",false);
+                preferences.putString(KEY_SSID,ssid);
+                preferences.putString(KEY_PASSWORD,psk);
+                preferences.end();                
+                delay(1000);
+                ESP.restart();
+              } else {
+                setupClient.println("HTTP/1.1 400 Bad Request");
+                setupClient.println("Content-Type: none");
+                setupClient.println("Connection: close");                
+              }
             } else {
               setupClient.println("HTTP/1.1 404 Not Found");
               setupClient.println("Connection: close");   
@@ -1157,7 +1180,6 @@ void setupSystem() {
             done = true;
             break;
           } else {
-            Serial.println(str);
             if(str.startsWith(contentlengthstr)) {
               req.m_content = "";
               String cl = str.substring(strlen(contentlengthstr),str.indexOf('\r'));
