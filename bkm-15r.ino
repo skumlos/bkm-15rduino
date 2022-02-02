@@ -3,8 +3,8 @@
 #include <WiFi.h>
 #include <Preferences.h>
 
-#define LED (2)
-#define FORCE_SETUP (27)
+#define LED         (2)   // Status LED
+#define FORCE_SETUP (27)  // If low during boot, will make the board enter setup mode
 
 #define RECV_TIMEOUT (1000)
 
@@ -334,6 +334,10 @@ State_t stateCopy;
 CommandQueue_t commandQueue;
 
 void addToggleButton(String& content, const char* command, const char* name, bool large = false) {
+  content += "<div class='togglediv'>\n" \
+    "<div class='togglelabel'>";
+  content += name;
+  content += "\n</div>\n";
   if(large) {
     content += "<button class='largeButton'";
   } else {    
@@ -344,20 +348,40 @@ void addToggleButton(String& content, const char* command, const char* name, boo
   content += "' onclick='toggle(\"";
   content += command;
   content += "\")'>";
-  content += name;
-  content += "</button>";
+  content += "<div id='";
+  content += command;
+  content += "-ind' class='indicator'/>\n";
+  content += "</button>" \
+    "</div>\n";
 }
 
 void addInfoButton(String& content, const char* command, const char* name, bool large = false) {
+//  if(large) {
+//    content += "<button class='largeButton' onclick='infoPush(\"";
+//  } else {
+//    content += "<button class='smallButton' onclick='infoPush(\"";    
+//  }
+//  content += command;
+//  content += "\")'>";
+//  content += name;
+//  content += "</button>";
+
+  content += "<div class='togglediv'>\n" \
+    "<div class='togglelabel'>";
+  content += name;
+  content += "\n</div>\n";
   if(large) {
-    content += "<button class='largeButton' onclick='infoPush(\"";
-  } else {
-    content += "<button class='smallButton' onclick='infoPush(\"";    
+    content += "<button class='largeButton'";
+  } else {    
+    content += "<button class='smallButton'";
   }
+  content += " id='";
+  content += command;
+  content += "' onclick='infoPush(\"";
   content += command;
   content += "\")'>";
-  content += name;
-  content += "</button>";
+  content += "</button>" \
+    "</div>\n";
 }
 
 void addBool(String& content, const char* key, bool val, bool last = false) {
@@ -409,8 +433,13 @@ void addStatus(String& content) {
   content += "\n}\n";  
 }
 
-void addKnob(String& content, const char* name) {
+void addKnob(String& content, const char* name, const char* command) {
   content += "<div class='knobdiv'>\n";
+  
+  content += "<div class='togglelabel'>";
+  content += name;
+  content += "\n</div>\n";
+
   content += "<input id='";
   content += name;
   content += "-factor";
@@ -423,8 +452,25 @@ void addKnob(String& content, const char* name) {
   content += "\",false)'>-</button>\n";
   content += "<button class='knobmod' onclick='turnKnob(\"";
   content += name;
-  content += "\",true)'>+</button>" \
-    "</div>\n";
+  content += "\",true)'>+</button>";
+
+  content += "<br>\n";
+  content += "<div class='togglelabel'>";
+  content += "MANUAL";
+  content += "\n</div>\n";
+
+  content += "<button class='smallButton'";
+  content += " id='";
+  content += command;
+  content += "' onclick='toggle(\"";
+  content += command;
+  content += "\")'>";
+  content += "<div id='";
+  content += command;
+  content += "-ind' class='indicator'/>\n";
+  content += "</button>\n";
+  
+  content += "\n</div>\n";
 }
 
 uint8_t handleReq(WiFiClient& client, String& url) {
@@ -463,7 +509,7 @@ uint8_t handleReq(WiFiClient& client, String& url) {
       "   remotediv.style.visibility='hidden';\n" \
       " }\n" \
       " for(const key in currentState.buttonStates) {\n" \
-      "   let elem = document.getElementById(key);\n" \
+      "   let elem = document.getElementById(key+'-ind');\n" \
       "   if(elem !== undefined && elem != null) {\n" \
       "     if(currentState.buttonStates[key]) {\n" \
       "       elem.classList.add('active');\n" \
@@ -519,12 +565,16 @@ uint8_t handleReq(WiFiClient& client, String& url) {
       content += "window.onload = updateState();\n";
       content +=  "</script>\n";
     content += "<style>\n" \
-      ".knobdiv { font-size: 10px; font-weight: bold; width: 50px; vertical-align: top; display: inline-block; }\n" \
+      "body { background-color: gray; font-family: sans-serif; }\n" \
+      ".knobdiv { font-size: 10px; font-weight: bold; width: 50px; color: white; vertical-align: top; text-align: center;display: inline-block; margin: 10px; }\n" \
       ".knobinput { width: 50px; box-sizing: border-box; }\n" \
       ".knobmod { width: 23px; height: 23px; }\n" \
-      ".smallButton { font-size: 10px; font-weight: bold; width: 50px; height: 50px; margin: 2px; vertical-align: top; }\n" \
-      ".largeButton { font-size: 10px; font-weight: bold; width: 60px; height: 60px; margin: 5px; vertical-align: top; }\n" \
-      ".active { color: white; background-color: limegreen; }\n" \
+      ".remotediv { border-color: black; }\n" \
+      ".togglediv { font-size: 10px;font-weight: bold; color: white; vertical-align: top; text-align: center; display: inline-block; }\n" \
+      ".smallButton { background-color: lightgray; width: 50px; height: 50px; margin: 2px; vertical-align: top; border-width: 1px; border-radius: 5px; }\n" \
+      ".largeButton { background-color: lightgray; width: 60px; height: 60px; margin: 5px; vertical-align: top; border-width: 1px; border-radius: 5px; }\n" \
+      ".indicator { height: 10px; width: 10px; border-radius: 5px; background-color: black; margin: auto; }\n" \
+      ".active { background-color: limegreen; }\n" \
       ".buttondiv { display: inline-block; margin: 5px; vertical-align: top; }\n" \
       "</style>\n";
     content += "</head>\n";
@@ -568,15 +618,15 @@ uint8_t handleReq(WiFiClient& client, String& url) {
     content += "</div>";
 
     content += "<div class='buttondiv'>";
-    addKnob(content,"PHASE");
-    addKnob(content,"CHROMA");
-    addKnob(content,"BRIGHTNESS");
-    addKnob(content,"CONTRAST");
-    content += "<br>";
-    addToggleButton(content,MAN_PHASE_BUTTON,"MANUAL PHASE");
-    addToggleButton(content,MAN_CHROMA_BUTTON,"MANUAL CHROMA");
-    addToggleButton(content,MAN_BRIGHT_BUTTON,"MANUAL BRIGHTNESS");
-    addToggleButton(content,MAN_CONTRAST_BUTTON,"MANUAL CONTRAST");
+    addKnob(content,"PHASE",MAN_PHASE_BUTTON);
+    addKnob(content,"CHROMA",MAN_CHROMA_BUTTON);
+    addKnob(content,"BRIGHTNESS",MAN_BRIGHT_BUTTON);
+    addKnob(content,"CONTRAST",MAN_CONTRAST_BUTTON);
+//    content += "<br>";
+//    addToggleButton(content,MAN_PHASE_BUTTON,"MANUAL PHASE");
+//    addToggleButton(content,MAN_CHROMA_BUTTON,"MANUAL CHROMA");
+//    addToggleButton(content,MAN_BRIGHT_BUTTON,"MANUAL BRIGHTNESS");
+//    addToggleButton(content,MAN_CONTRAST_BUTTON,"MANUAL CONTRAST");
     content += "</div>";
 
     content += "<div class='buttondiv'>";
