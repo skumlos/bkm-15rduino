@@ -309,7 +309,7 @@ uint16_t statusw5 = 0xFFFF,_statusw5 = 0xFFFF;
 
 typedef struct {
   // when was the waiter added
-  unsigned long m_addTick_ms;
+  unsigned long m_added_ms;
   // the associated connection
   WiFiClient m_client;  
 } StatusWaiter_t;
@@ -333,7 +333,7 @@ State_t currentState = { .m_linkUp = false, .m_connected = false, .m_isValid = f
 State_t stateCopy;
 CommandQueue_t commandQueue;
 
-void addToggleButton(String& content, const char* command, const char* name, bool large = false) {
+void addToggleButton(String& content, const char* command, const char* name, bool large = false, bool hasIndicator = true) {
   content += "<div class='togglediv'>\n" \
     "<div class='togglelabel'>";
   content += name;
@@ -348,24 +348,16 @@ void addToggleButton(String& content, const char* command, const char* name, boo
   content += "' onclick='toggle(\"";
   content += command;
   content += "\")'>";
-  content += "<div id='";
-  content += command;
-  content += "-ind' class='indicator'/>\n";
+  if(hasIndicator) {
+    content += "<div id='";
+    content += command;
+    content += "-ind' class='indicator'/>\n";
+  }
   content += "</button>" \
     "</div>\n";
 }
 
 void addInfoButton(String& content, const char* command, const char* name, bool large = false) {
-//  if(large) {
-//    content += "<button class='largeButton' onclick='infoPush(\"";
-//  } else {
-//    content += "<button class='smallButton' onclick='infoPush(\"";    
-//  }
-//  content += command;
-//  content += "\")'>";
-//  content += name;
-//  content += "</button>";
-
   content += "<div class='togglediv'>\n" \
     "<div class='togglelabel'>";
   content += name;
@@ -541,9 +533,11 @@ uint8_t handleReq(WiFiClient& client, String& url) {
     content += statusWaitURL;
     content += "', true);\n" \
       "  xhttp.onreadystatechange = function() {\n" \
-      "    if (this.readyState == 4 && this.status == 200) {\n" \
-      "       let status = JSON.parse(xhttp.response);\n" \
-      "       setState(status);\n" \
+      "    if (this.readyState == 4) {\n" \
+      "       if(this.status == 200) {\n" \
+      "         let status = JSON.parse(xhttp.response);\n" \
+      "         setState(status);\n" \
+      "       }\n" \
       "       waitStateUpdate();\n" \
       "    }\n" \
       "  };\n" \
@@ -565,14 +559,15 @@ uint8_t handleReq(WiFiClient& client, String& url) {
       content += "window.onload = updateState();\n";
       content +=  "</script>\n";
     content += "<style>\n" \
-      "body { background-color: gray; font-family: sans-serif; }\n" \
+      "body { font-family: sans-serif; }\n" \
       ".knobdiv { font-size: 10px; font-weight: bold; width: 50px; color: white; vertical-align: top; text-align: center;display: inline-block; margin: 10px; }\n" \
       ".knobinput { width: 50px; box-sizing: border-box; }\n" \
       ".knobmod { width: 23px; height: 23px; }\n" \
-      ".remotediv { border-color: black; }\n" \
+      "#remotediv { border: solid 2px black; background-color: gray; padding: 10px; width: max-content; }\n" \
       ".togglediv { font-size: 10px;font-weight: bold; color: white; vertical-align: top; text-align: center; display: inline-block; }\n" \
       ".smallButton { background-color: lightgray; width: 50px; height: 50px; margin: 2px; vertical-align: top; border-width: 1px; border-radius: 5px; }\n" \
       ".largeButton { background-color: lightgray; width: 60px; height: 60px; margin: 5px; vertical-align: top; border-width: 1px; border-radius: 5px; }\n" \
+      ".powerdiv { text-align: center; }\n" \
       ".indicator { height: 10px; width: 10px; border-radius: 5px; background-color: black; margin: auto; }\n" \
       ".active { background-color: limegreen; }\n" \
       ".buttondiv { display: inline-block; margin: 5px; vertical-align: top; }\n" \
@@ -622,11 +617,6 @@ uint8_t handleReq(WiFiClient& client, String& url) {
     addKnob(content,"CHROMA",MAN_CHROMA_BUTTON);
     addKnob(content,"BRIGHTNESS",MAN_BRIGHT_BUTTON);
     addKnob(content,"CONTRAST",MAN_CONTRAST_BUTTON);
-//    content += "<br>";
-//    addToggleButton(content,MAN_PHASE_BUTTON,"MANUAL PHASE");
-//    addToggleButton(content,MAN_CHROMA_BUTTON,"MANUAL CHROMA");
-//    addToggleButton(content,MAN_BRIGHT_BUTTON,"MANUAL BRIGHTNESS");
-//    addToggleButton(content,MAN_CONTRAST_BUTTON,"MANUAL CONTRAST");
     content += "</div>";
 
     content += "<div class='buttondiv'>";
@@ -646,8 +636,8 @@ uint8_t handleReq(WiFiClient& client, String& url) {
     addInfoButton(content,INFO_INP_ENTER,"ENT");
     content += "</div>";
 
-    content += "<div class='buttondiv'>";
-    addToggleButton(content,DEGAUSS_BUTTON,"DEGAUSS");
+    content += "<div class='buttondiv powerdiv'>";
+    addToggleButton(content,DEGAUSS_BUTTON,"DEGAUSS",false,false);
     content += "<br>";
     addToggleButton(content,POWER_BUTTON,"POWER",true);
     content += "</div>";
@@ -698,7 +688,7 @@ uint8_t handleReq(WiFiClient& client, String& url) {
     if(statusWaiters.m_waiterCnt < MAX_WAITERS) {
       StatusWaiter_t& waiter = statusWaiters.m_waiters[statusWaiters.m_waiterCnt];
       waiter.m_client = client;
-      waiter.m_addTick_ms = millis();
+      waiter.m_added_ms = millis();
       statusWaiters.m_waiterCnt++;
       rv = 1;
     } else {
@@ -820,24 +810,42 @@ void webserverHandler( void * pvParameters ){
       updateWaiters = true;
     }
     xSemaphoreGive(state_sem);
-    if(updateWaiters && statusWaiters.m_waiterCnt > 0) {
-      String content;
-      for(uint8_t w = 0; w < statusWaiters.m_waiterCnt; ++w) {
-        WiFiClient waitClient = statusWaiters.m_waiters[w].m_client;
-        content = "";
-        addStatus(content);
-        waitClient.println("HTTP/1.1 200 OK");
-        waitClient.println("Content-Type: application/json");
-        waitClient.print("Content-Length: ");
-        waitClient.println(content.length());
-        waitClient.println("Connection: close");
-        waitClient.println();
-        waitClient.println(content);
-        waitClient.flush();
-        waitClient.stop();
-        delay(10);
+    if(statusWaiters.m_waiterCnt > 0) {
+      if(updateWaiters) {
+        String content;
+        for(uint8_t w = 0; w < statusWaiters.m_waiterCnt; ++w) {
+          WiFiClient waitClient = statusWaiters.m_waiters[w].m_client;
+          content = "";
+          addStatus(content);
+          waitClient.println("HTTP/1.1 200 OK");
+          waitClient.println("Content-Type: application/json");
+          waitClient.print("Content-Length: ");
+          waitClient.println(content.length());
+          waitClient.println("Connection: close");
+          waitClient.println();
+          waitClient.println(content);
+          waitClient.flush();
+          waitClient.stop();
+          delay(10);
+        }
+        statusWaiters.m_waiterCnt = 0;
+      } else {
+        // go through waiters reset
+        /*
+        for(uint8_t w = 0; w < statusWaiters.m_waiterCnt; ++w) {
+          if(millis() - statusWaiters.m_waiters[w].m_added_ms > 60000) {
+            WiFiClient waitClient = statusWaiters.m_waiters[w].m_client;
+            waitClient.println("HTTP/1.1 204 No Content");
+            waitClient.println("Content-Type: none");
+            waitClient.println("Connection: close");
+            waitClient.println();
+            waitClient.flush();
+            waitClient.stop();
+            // remove client
+          }
+          */
+        }
       }
-      statusWaiters.m_waiterCnt = 0;
     } 
     updateWaiters = false;
     delay(10);
@@ -961,7 +969,7 @@ void setup() {
     webServer.begin();
     
     Serial.println(WiFi.localIP());
-    
+
     //create a task to run the webserver stuff on core 0, as core 1 is default
     xTaskCreatePinnedToCore(webserverHandler, "Webserver", 10000, NULL, 1, &webServerTask, 0);
     xTaskCreatePinnedToCore(statusLEDBlinker, "LED Blinker", 1000, NULL, 2, &ledTask, 0);
@@ -1290,8 +1298,8 @@ void loop() {
       if(NULL != knobAction) {
         turnKnob(knobAction->m_knob,knobAction->m_factor * (knobAction->m_positive ? 1 : -1),knobAction->m_value);
       }
-    
-      if(millis() >= lastStatusUpdate_ms + 150) {
+
+      if(millis() - lastStatusUpdate_ms >= 150) {
         updateStatus();
         lastStatusUpdate_ms = millis();
       }
