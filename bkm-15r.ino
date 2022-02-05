@@ -283,7 +283,52 @@ typedef struct {
   String m_content;
 } WebRequest_t;
 
-#define MAX_QUEUELEN (10)
+template <typename T>
+class Queue {
+public:
+  Queue(const uint8_t queueLen) : m_maxCount(queueLen), m_count(0)
+  {
+    m_queueData = malloc(queueLen*sizeof(T));
+    m_head = 0;
+    m_tail = 0;
+  };
+
+  T* peek() {
+    if(m_count == 0) return NULL;    
+    return &((T*)m_queueData)[m_tail];;
+  };
+
+  T* pop(T* t) {
+    if(m_count == 0) return NULL;
+    memcpy(t,&((T*)m_queueData)[m_tail],sizeof(T));
+    ++m_tail;
+    --m_count;
+    if(m_tail >= m_maxCount) m_tail = 0;
+    return t;
+  };
+
+  void push(T* t) {
+    if(m_count + 1 > m_maxCount) return;
+    memcpy(&((T*)m_queueData)[m_head],t,sizeof(T));
+    ++m_head;
+    ++m_count;
+    if(m_head >= m_maxCount) m_head = 0;
+  };
+
+  uint8_t getCount() {
+     return m_count;
+  };
+ 
+private:
+  uint8_t m_maxCount;
+  uint8_t m_tail;
+  uint8_t m_head;
+  uint8_t m_count;
+  void* m_queueData; 
+};
+
+
+#define MAX_QUEUELEN (5)
 enum CommandType {
   CT_STATUS,
   CT_INFO  
@@ -294,10 +339,10 @@ typedef struct {
   char m_command[20];
 } Command_t;
 
-typedef struct {
-  Command_t m_commands[MAX_QUEUELEN];
-  uint8_t m_queueLen;  
-} CommandQueue_t;
+//typedef struct {
+//  Command_t m_commands[MAX_QUEUELEN];
+//  uint8_t m_queueLen;  
+//} CommandQueue_t;
 
 bool statusUpdated = false;
 
@@ -316,12 +361,7 @@ typedef struct {
 
 #define MAX_WAITERS (4)
 
-typedef struct {
-  StatusWaiter_t m_waiters[MAX_WAITERS];
-  uint8_t m_waiterCnt;  
-} StatusWaiters_t;
-
-StatusWaiters_t statusWaiters;
+//StatusWaiters_t statusWaiters;
 
 const char toggleURL[]      = "/toggle/";
 const char knobURL[]        = "/turnknob/";
@@ -331,7 +371,9 @@ const char statusWaitURL[] = "/statuswait";
 
 State_t currentState = { .m_linkUp = false, .m_connected = false, .m_isValid = false, .m_isPowered = false };
 State_t stateCopy;
-CommandQueue_t commandQueue;
+
+//CommandQueue_t commandQueue;
+Queue<Command_t> commandQueue(MAX_QUEUELEN);
 
 void addToggleButton(String& content, const char* command, const char* name, bool large = false, bool hasIndicator = true) {
   content += "<div class='togglediv'>\n" \
@@ -385,6 +427,8 @@ void addBool(String& content, const char* key, bool val, bool last = false) {
     content += "\n";
 }
 
+int statusPacketNo = 0;
+
 void addStatus(String& content) {
   xSemaphoreTake(state_sem, portMAX_DELAY);
   State_t state = currentState;
@@ -399,7 +443,10 @@ void addStatus(String& content) {
   content += "\"m_isValid\":";
   content += state.m_isValid ? "true" : "false";
   content += ",\n";
-  content += "\"buttonStates\":{";
+  content += "\"m_packetNo\":";
+  content += statusPacketNo;
+  content += ",\n";
+  content += "\"buttonStates\":{\n";
   addBool(content,POWER_BUTTON,state.m_isPowered);
   addBool(content,SCANMODE_BUTTON,state.m_scanmode);
   addBool(content,HDELAY_BUTTON,state.m_hdelay);
@@ -421,8 +468,8 @@ void addStatus(String& content) {
   addBool(content,MAN_CHROMA_BUTTON,state.m_man_chroma);
   addBool(content,MAN_BRIGHT_BUTTON,state.m_man_bright);
   addBool(content,MAN_CONTRAST_BUTTON,state.m_man_contrast,true);
-  content += "\n}\n";  
-  content += "\n}\n";  
+  content += "}\n";  
+  content += "}\n";  
 }
 
 void addKnob(String& content, const char* name, const char* command) {
@@ -465,7 +512,7 @@ void addKnob(String& content, const char* name, const char* command) {
   content += "\n</div>\n";
 }
 
-uint8_t handleReq(WiFiClient& client, String& url) {
+uint8_t handleReq(WiFiClient& wlclient, String& url) {
   uint8_t rv = 0;
   if(url == "/") {
     String content;
@@ -521,7 +568,9 @@ uint8_t handleReq(WiFiClient& client, String& url) {
       "    if (this.readyState == 4 && this.status == 200) {\n" \
       "       let status = JSON.parse(xhttp.response);\n" \
       "       setState(status);\n" \
-      "       waitStateUpdate();\n" \
+//      "       waitStateUpdate();\n" \
+  
+      "       setTimeout(updateState,100);\n" \
       "    }\n" \
       "  };\n" \
       "  xhttp.send();\n" \
@@ -532,13 +581,20 @@ uint8_t handleReq(WiFiClient& client, String& url) {
       "  xhttp.open('GET', '";
     content += statusWaitURL;
     content += "', true);\n" \
+      "                   xhttp.timeout = 60000;\n" \
       "  xhttp.onreadystatechange = function() {\n" \
       "    if (this.readyState == 4) {\n" \
       "       if(this.status == 200) {\n" \
       "         let status = JSON.parse(xhttp.response);\n" \
       "         setState(status);\n" \
-      "       }\n" \
       "       waitStateUpdate();\n" \
+      "       }\n" \
+      "       else if(this.status == 503) {\n" \
+      "       if(confirm('update? ' + this.status))\n" \
+      "       waitStateUpdate();\n" \
+      "       } else \n" \
+      "       waitStateUpdate();\n" \
+      "     console.log(xhttp.response)\n" \
       "    }\n" \
       "  };\n" \
       "  xhttp.send();\n" \
@@ -647,55 +703,76 @@ uint8_t handleReq(WiFiClient& client, String& url) {
     content += "</html>\n";
 
     // send a standard http response header
-    client.println("HTTP/1.1 200 OK");
-    client.println("Content-Type: text/html");
-    client.print("Content-Length: ");
-    client.println(content.length());
-    client.println("Connection: close");
-    client.println();
-    client.println(content);
+    wlclient.println("HTTP/1.1 200 OK");
+    wlclient.println("Content-Type: text/html");
+    wlclient.print("Content-Length: ");
+    wlclient.println(content.length());
+    wlclient.println("Connection: close");
+    wlclient.println();
+    wlclient.println(content);
   } else if(url.startsWith(toggleURL)) {
-    xSemaphoreTake(state_sem, portMAX_DELAY);    
-    if(commandQueue.m_queueLen+1 < MAX_QUEUELEN) {
-      strcpy(commandQueue.m_commands[commandQueue.m_queueLen].m_command,url.substring(strlen(toggleURL)).c_str());
-      commandQueue.m_commands[commandQueue.m_queueLen++].m_commandType = CT_STATUS;
+    xSemaphoreTake(state_sem, portMAX_DELAY);
+    if(commandQueue.getCount() < MAX_QUEUELEN) {
+      Command_t cmd;
+      strcpy(cmd.m_command,url.substring(strlen(toggleURL)).c_str());
+      cmd.m_commandType = CT_STATUS;
+      commandQueue.push(&cmd);
     }
+    
+//    if(commandQueue.m_queueLen+1 < MAX_QUEUELEN) {
+//      strcpy(commandQueue.m_commands[commandQueue.m_queueLen].m_command,url.substring(strlen(toggleURL)).c_str());
+//      commandQueue.m_commands[commandQueue.m_queueLen++].m_commandType = CT_STATUS;
+//    }
     xSemaphoreGive(state_sem);
-    client.println("HTTP/1.1 200 OK");
-    client.println("Content-Type: none");
-    client.println("Connection: close");
+    wlclient.println("HTTP/1.1 200 OK");
+    wlclient.println("Content-Type: none");
+    wlclient.println("Connection: close");
+    wlclient.println();
   } else if(url.startsWith(infoPushURL)) {
     xSemaphoreTake(state_sem, portMAX_DELAY);    
-    if(commandQueue.m_queueLen+1 < MAX_QUEUELEN) {
-      strcpy(commandQueue.m_commands[commandQueue.m_queueLen].m_command,url.substring(strlen(infoPushURL)).c_str());
-      commandQueue.m_commands[commandQueue.m_queueLen++].m_commandType = CT_INFO;
+    if(commandQueue.getCount() < MAX_QUEUELEN) {
+      Command_t cmd;
+      strcpy(cmd.m_command,url.substring(strlen(infoPushURL)).c_str());
+      cmd.m_commandType = CT_INFO;
+      commandQueue.push(&cmd);
     }
+//    if(commandQueue.m_queueLen+1 < MAX_QUEUELEN) {
+//      strcpy(commandQueue.m_commands[commandQueue.m_queueLen].m_command,url.substring(strlen(infoPushURL)).c_str());
+//      commandQueue.m_commands[commandQueue.m_queueLen++].m_commandType = CT_INFO;
+//    }
     xSemaphoreGive(state_sem);
-    client.println("HTTP/1.1 200 OK");
-    client.println("Content-Type: none");
-    client.println("Connection: close");
+    wlclient.println("HTTP/1.1 200 OK");
+    wlclient.println("Content-Type: none");
+    wlclient.println("Connection: close");
+    wlclient.println();
   } else if(url.startsWith(statusGetURL)) {
     String content;
     addStatus(content);
-    client.println("HTTP/1.1 200 OK");
-    client.println("Content-Type: application/json");
-    client.print("Content-Length: ");
-    client.println(content.length());
-    client.println("Connection: close");
-    client.println();
-    client.println(content);
+    statusPacketNo++;
+    wlclient.println("HTTP/1.1 200 OK");
+    wlclient.println("Content-Type: application/json");
+    wlclient.print("Content-Length: ");
+    wlclient.println(content.length());
+    wlclient.println("Connection: close");
+    wlclient.println();
+    wlclient.println(content);
   } else if(url.startsWith(statusWaitURL)) {
-    if(statusWaiters.m_waiterCnt < MAX_WAITERS) {
-      StatusWaiter_t& waiter = statusWaiters.m_waiters[statusWaiters.m_waiterCnt];
-      waiter.m_client = client;
+    Serial.println("Statuswaiter");
+/*    if(statusWaiters.getCount() < MAX_WAITERS) {
+      Serial.println("lets add this Statuswaiter");
+      StatusWaiter_t waiter;
       waiter.m_added_ms = millis();
-      statusWaiters.m_waiterCnt++;
+      waiter.m_client = wlclient;
+      Serial.println("Pushing waiter");
+//      statusWaiters.push(&waiter);    
       rv = 1;
     } else {
-      client.println("HTTP/1.1 503 Service Unavailable");
-      client.println("Content-Type: none");
-      client.println("Connection: close");
-    }
+    Serial.println("no more room for Statuswaiter");
+      wlclient.println("HTTP/1.1 503 Service Unavailable");
+      wlclient.println("Content-Type: none");
+      wlclient.println("Connection: close");
+      wlclient.println();
+    }*/
   } else if(url.startsWith(knobURL)) {
     if(knobActions.m_actionCnt < MAX_KNOBACTIONS) {
       try {
@@ -742,113 +819,140 @@ uint8_t handleReq(WiFiClient& client, String& url) {
           knobActions.m_actionCnt++;
           xSemaphoreGive(state_sem);
     
-          client.println("HTTP/1.1 200 OK");
-          client.println("Content-Type: none");
-          client.println("Connection: close");
+          wlclient.println("HTTP/1.1 200 OK");
+          wlclient.println("Content-Type: none");
+          wlclient.println("Connection: close");
+          wlclient.println();
         } else {
           throw false;
         }
       } catch(const bool ex) {
         Serial.print("Failed deciphering knob request '");
         Serial.println(url);
-        client.println("HTTP/1.1 404 Not Found");
-        client.println("Connection: close");    
+        wlclient.println("HTTP/1.1 404 Not Found");
+        wlclient.println("Connection: close");
+        wlclient.println();    
       }      
     } else {
-      client.println("HTTP/1.1 503 Service Unavailable");
-      client.println("Content-Type: none");
-      client.println("Connection: close");
+      wlclient.println("HTTP/1.1 503 Service Unavailable");
+      wlclient.println("Content-Type: none");
+      wlclient.println("Connection: close");
+      wlclient.println();
     }      
   } else {
-    client.println("HTTP/1.1 404 Not Found");
-    client.println("Connection: close");    
+    wlclient.println("HTTP/1.1 404 Not Found");
+    wlclient.println("Connection: close");
+    wlclient.println();    
   }
   return rv;
+}
+  bool updateWaiters = false;
+
+void checkStatusNotification(){
+/*  xSemaphoreTake(state_sem, portMAX_DELAY);    
+  if(statusUpdated) {
+    stateCopy = currentState;
+    statusUpdated = false;
+    updateWaiters = true;
+  }
+  xSemaphoreGive(state_sem);
+  if(statusWaiters.getCount()) {
+    StatusWaiter_t w;
+    if(updateWaiters) {
+      String content;
+      content = "";
+      addStatus(content);
+      statusPacketNo++;
+      while(statusWaiters.getCount() > 0) {
+        Serial.print("Waiters ");
+        Serial.println(statusWaiters.getCount());
+        if(statusWaiters.pop(&w) != NULL) {
+          Serial.println("notifying waiter");
+          w.m_client.println("HTTP/1.1 200 OK");
+          w.m_client.println("Content-Type: application/json");
+          w.m_client.print("Content-Length: ");
+          w.m_client.println(content.length());
+          w.m_client.println("Connection: close");
+          w.m_client.println();
+          w.m_client.println(content);
+          Serial.println("stopping waiter");
+          w.m_client.stop();
+          Serial.println("notified waiter");
+          delay(10);
+        }
+      }
+      Serial.println("Done updating waiters...");
+      updateWaiters = false;
+    } else {
+      Serial.println("Checking if anybody needs updating");
+      delay(1);
+      // go through waiters reset
+      unsigned long ms = millis();
+      while(statusWaiters.peek() != NULL) {
+          if(ms - statusWaiters.peek()->m_added_ms < 6000) {
+            Serial.print("tail is good ");
+            Serial.println(ms - statusWaiters.peek()->m_added_ms);
+            break;
+          }
+          StatusWaiter_t w;
+          if(statusWaiters.pop(&w) != NULL) {
+            Serial.println("Killing waiter");
+            w.m_client.println("HTTP/1.1 204 No Content");
+            w.m_client.println("Content-Type: none");
+            w.m_client.println("Connection: close");
+            w.m_client.println();
+            w.m_client.stop();
+            Serial.println("Killed waiter");
+          }
+       }
+    }
+  } else {
+    Serial.println("no waiters...");
+  }*/
 }
 
 void webserverHandler( void * pvParameters ){
   bool stopClient = true;
-  bool updateWaiters = false;
   while(true) {
-    WiFiClient client = webServer.available();
-    if (client) {
+    WiFiClient cl = webServer.available();
+    if (cl) {
       // a http request ends with a blank line
       String str;
       WebRequest_t req;
+//      Serial.println("New client");
       bool done = false;
-      while (client.connected()) {
-        while (client.available()) {
-          char c = client.read();
+      unsigned long start_ms;
+      while (!done) {
+        while (cl.available()) {
+          char c = cl.read();
           str += c;
           if(c == '\n') {
             if(str == "\r\n") {
-              stopClient = (handleReq(client,req.m_URL) == 0);
+              stopClient = (handleReq(cl,req.m_URL) == 0);
               done = true;
               break;
             } else {
               if(str.startsWith("GET")) {
                 str = str.substring(4,str.indexOf(' ',4));
                 req.m_URL = str;
+//                Serial.println(str);
               }
             }
             str = "";
           }
         }
         if(done) break;
-        delay(1);
+//        checkStatusNotification();
+          delay(1);
       }
-      // close the connection:
       if(stopClient) {
-        client.flush();
-        client.stop();
+        // close the connection:
+        cl.stop();
       }
+      delay(1);
     }
-    xSemaphoreTake(state_sem, portMAX_DELAY);    
-    if(statusUpdated) {
-      stateCopy = currentState;
-      statusUpdated = false;
-      updateWaiters = true;
-    }
-    xSemaphoreGive(state_sem);
-    if(statusWaiters.m_waiterCnt > 0) {
-      if(updateWaiters) {
-        String content;
-        for(uint8_t w = 0; w < statusWaiters.m_waiterCnt; ++w) {
-          WiFiClient waitClient = statusWaiters.m_waiters[w].m_client;
-          content = "";
-          addStatus(content);
-          waitClient.println("HTTP/1.1 200 OK");
-          waitClient.println("Content-Type: application/json");
-          waitClient.print("Content-Length: ");
-          waitClient.println(content.length());
-          waitClient.println("Connection: close");
-          waitClient.println();
-          waitClient.println(content);
-          waitClient.flush();
-          waitClient.stop();
-          delay(10);
-        }
-        statusWaiters.m_waiterCnt = 0;
-      } else {
-        // go through waiters reset
-        /*
-        for(uint8_t w = 0; w < statusWaiters.m_waiterCnt; ++w) {
-          if(millis() - statusWaiters.m_waiters[w].m_added_ms > 60000) {
-            WiFiClient waitClient = statusWaiters.m_waiters[w].m_client;
-            waitClient.println("HTTP/1.1 204 No Content");
-            waitClient.println("Content-Type: none");
-            waitClient.println("Connection: close");
-            waitClient.println();
-            waitClient.flush();
-            waitClient.stop();
-            // remove client
-          }
-          */
-        }
-      }
-    } 
-    updateWaiters = false;
     delay(10);
+//    checkStatusNotification();
   }
 }
 
@@ -961,8 +1065,8 @@ void setup() {
     memcpy(packetBuf,header,sizeof(header));
     
     currentState.m_linkUp = (Ethernet.linkStatus() == LinkON);
-    commandQueue.m_queueLen = 0;
-    statusWaiters.m_waiterCnt = 0;
+//    commandQueue.m_queueLen = 0;
+//    statusWaiters.m_waiterCnt = 0;
     knobActions.m_actionCnt = 0;
     
     Serial.println("Starting WebServer");
@@ -971,7 +1075,7 @@ void setup() {
     Serial.println(WiFi.localIP());
 
     //create a task to run the webserver stuff on core 0, as core 1 is default
-    xTaskCreatePinnedToCore(webserverHandler, "Webserver", 10000, NULL, 1, &webServerTask, 0);
+    xTaskCreatePinnedToCore(webserverHandler, "Webserver", 40000, NULL, 1, &webServerTask, 0);
     xTaskCreatePinnedToCore(statusLEDBlinker, "LED Blinker", 1000, NULL, 2, &ledTask, 0);
   }
 }
@@ -1271,13 +1375,16 @@ void loop() {
     if(!monitorClient.connected()) {
       connectMonitor();
     } else {
+      Command_t c;
       Command_t* cmd = NULL;
       KnobAction_t* knobAction = NULL;
       xSemaphoreTake(state_sem, portMAX_DELAY);
-      if(commandQueue.m_queueLen > 0) {
-        cmd = &commandQueue.m_commands[commandQueue.m_queueLen-1];
-        commandQueue.m_queueLen--;
-      }
+      cmd = commandQueue.pop(&c);
+      // FIXME * * * * * * * * * * * * * * * * * * *
+//      if(commandQueue.m_queueLen > 0) {
+//        cmd = &commandQueue.m_commands[commandQueue.m_queueLen-1];
+//        commandQueue.m_queueLen--;
+//      }
       if(knobActions.m_actionCnt > 0) {
         knobAction = &(knobActions.m_actions[knobActions.m_actionCnt-1]);
         knobActions.m_actionCnt--;
