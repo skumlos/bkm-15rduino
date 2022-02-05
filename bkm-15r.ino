@@ -98,6 +98,8 @@ byte mac[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED };
 
 bool settingUp = false;
 
+const char contentlengthstr[] = "Content-Length: ";
+
 Preferences preferences;
 
 #define MONITOR_PORT (53484)
@@ -301,6 +303,7 @@ public:
   T* pop(T* t) {
     if(m_count == 0) return NULL;
     memcpy(t,&((T*)m_queueData)[m_tail],sizeof(T));
+    
     ++m_tail;
     --m_count;
     if(m_tail >= m_maxCount) m_tail = 0;
@@ -327,7 +330,6 @@ private:
   void* m_queueData; 
 };
 
-
 #define MAX_QUEUELEN (5)
 enum CommandType {
   CT_STATUS,
@@ -339,11 +341,6 @@ typedef struct {
   char m_command[20];
 } Command_t;
 
-//typedef struct {
-//  Command_t m_commands[MAX_QUEUELEN];
-//  uint8_t m_queueLen;  
-//} CommandQueue_t;
-
 bool statusUpdated = false;
 
 uint16_t statusw1 = 0xFFFF,_statusw1 = 0xFFFF;
@@ -353,15 +350,58 @@ uint16_t statusw4 = 0xFFFF,_statusw4 = 0xFFFF;
 uint16_t statusw5 = 0xFFFF,_statusw5 = 0xFFFF;
 
 typedef struct {
-  // when was the waiter added
-  unsigned long m_added_ms;
   // the associated connection
   WiFiClient m_client;  
+  // when was the waiter added
+  unsigned long m_added_ms;
 } StatusWaiter_t;
 
 #define MAX_WAITERS (4)
+// due to smart pointers in wificlient
+class WaiterQueue {
+public:
+  WaiterQueue() : m_maxCount(MAX_WAITERS), m_count(0)
+  {
+    m_head = 0;
+    m_tail = 0;
+  };
 
-//StatusWaiters_t statusWaiters;
+  StatusWaiter_t* peek() {
+    if(m_count == 0) return NULL;    
+    return &(m_waiters[m_tail]);
+  };
+
+  StatusWaiter_t* pop(StatusWaiter_t& t) {
+    if(m_count == 0) return NULL;
+    t = m_waiters[m_tail];
+    m_waiters[m_tail].m_client.stop();
+    ++m_tail;
+    --m_count;
+    if(m_tail >= m_maxCount) m_tail = 0;
+    return &t;
+  };
+
+  void push(StatusWaiter_t& t) {
+    if(m_count + 1 > m_maxCount) return;
+    m_waiters[m_tail] = t;
+    ++m_head;
+    ++m_count;
+    if(m_head >= m_maxCount) m_head = 0;
+  };
+
+  uint8_t getCount() {
+     return m_count;
+  };
+ 
+private:
+  uint8_t m_maxCount;
+  uint8_t m_tail;
+  uint8_t m_head;
+  uint8_t m_count;
+  StatusWaiter_t m_waiters[MAX_WAITERS];
+};
+
+WaiterQueue statusWaiters;
 
 const char toggleURL[]      = "/toggle/";
 const char knobURL[]        = "/turnknob/";
@@ -372,7 +412,6 @@ const char statusWaitURL[] = "/statuswait";
 State_t currentState = { .m_linkUp = false, .m_connected = false, .m_isValid = false, .m_isPowered = false };
 State_t stateCopy;
 
-//CommandQueue_t commandQueue;
 Queue<Command_t> commandQueue(MAX_QUEUELEN);
 
 void addToggleButton(String& content, const char* command, const char* name, bool large = false, bool hasIndicator = true) {
@@ -512,8 +551,7 @@ void addKnob(String& content, const char* name, const char* command) {
   content += "\n</div>\n";
 }
 
-uint8_t handleReq(WiFiClient& wlclient, String& url) {
-  uint8_t rv = 0;
+void handleReq(WiFiClient& wlclient, String& url) {
   if(url == "/") {
     String content;
     content += "<!DOCTYPE HTML>\n";
@@ -568,9 +606,7 @@ uint8_t handleReq(WiFiClient& wlclient, String& url) {
       "    if (this.readyState == 4 && this.status == 200) {\n" \
       "       let status = JSON.parse(xhttp.response);\n" \
       "       setState(status);\n" \
-//      "       waitStateUpdate();\n" \
-  
-      "       setTimeout(updateState,100);\n" \
+      "       waitStateUpdate();\n" \
       "    }\n" \
       "  };\n" \
       "  xhttp.send();\n" \
@@ -587,14 +623,13 @@ uint8_t handleReq(WiFiClient& wlclient, String& url) {
       "       if(this.status == 200) {\n" \
       "         let status = JSON.parse(xhttp.response);\n" \
       "         setState(status);\n" \
-      "       waitStateUpdate();\n" \
+      "         waitStateUpdate();\n" \
+      "       } else if (this.status == 503) {\n" \
+      "         waitStateUpdate();\n" \
+      "       } else if (this.status == 503) {\n" \
+      "         setTimeout(waitStateUpdate,500);\n" \
       "       }\n" \
-      "       else if(this.status == 503) {\n" \
-      "       if(confirm('update? ' + this.status))\n" \
-      "       waitStateUpdate();\n" \
-      "       } else \n" \
-      "       waitStateUpdate();\n" \
-      "     console.log(xhttp.response)\n" \
+      "       console.log(xhttp.response)\n" \
       "    }\n" \
       "  };\n" \
       "  xhttp.send();\n" \
@@ -718,11 +753,6 @@ uint8_t handleReq(WiFiClient& wlclient, String& url) {
       cmd.m_commandType = CT_STATUS;
       commandQueue.push(&cmd);
     }
-    
-//    if(commandQueue.m_queueLen+1 < MAX_QUEUELEN) {
-//      strcpy(commandQueue.m_commands[commandQueue.m_queueLen].m_command,url.substring(strlen(toggleURL)).c_str());
-//      commandQueue.m_commands[commandQueue.m_queueLen++].m_commandType = CT_STATUS;
-//    }
     xSemaphoreGive(state_sem);
     wlclient.println("HTTP/1.1 200 OK");
     wlclient.println("Content-Type: none");
@@ -736,10 +766,6 @@ uint8_t handleReq(WiFiClient& wlclient, String& url) {
       cmd.m_commandType = CT_INFO;
       commandQueue.push(&cmd);
     }
-//    if(commandQueue.m_queueLen+1 < MAX_QUEUELEN) {
-//      strcpy(commandQueue.m_commands[commandQueue.m_queueLen].m_command,url.substring(strlen(infoPushURL)).c_str());
-//      commandQueue.m_commands[commandQueue.m_queueLen++].m_commandType = CT_INFO;
-//    }
     xSemaphoreGive(state_sem);
     wlclient.println("HTTP/1.1 200 OK");
     wlclient.println("Content-Type: none");
@@ -757,22 +783,17 @@ uint8_t handleReq(WiFiClient& wlclient, String& url) {
     wlclient.println();
     wlclient.println(content);
   } else if(url.startsWith(statusWaitURL)) {
-    Serial.println("Statuswaiter");
-/*    if(statusWaiters.getCount() < MAX_WAITERS) {
-      Serial.println("lets add this Statuswaiter");
+    if(statusWaiters.getCount() < MAX_WAITERS) {
       StatusWaiter_t waiter;
       waiter.m_added_ms = millis();
       waiter.m_client = wlclient;
-      Serial.println("Pushing waiter");
-//      statusWaiters.push(&waiter);    
-      rv = 1;
+      statusWaiters.push(waiter);    
     } else {
-    Serial.println("no more room for Statuswaiter");
       wlclient.println("HTTP/1.1 503 Service Unavailable");
       wlclient.println("Content-Type: none");
       wlclient.println("Connection: close");
       wlclient.println();
-    }*/
+    }
   } else if(url.startsWith(knobURL)) {
     if(knobActions.m_actionCnt < MAX_KNOBACTIONS) {
       try {
@@ -844,18 +865,19 @@ uint8_t handleReq(WiFiClient& wlclient, String& url) {
     wlclient.println("Connection: close");
     wlclient.println();    
   }
-  return rv;
 }
-  bool updateWaiters = false;
+
+bool updateWaiters = false;
 
 void checkStatusNotification(){
-/*  xSemaphoreTake(state_sem, portMAX_DELAY);    
+  xSemaphoreTake(state_sem, portMAX_DELAY);    
   if(statusUpdated) {
     stateCopy = currentState;
     statusUpdated = false;
     updateWaiters = true;
   }
   xSemaphoreGive(state_sem);
+
   if(statusWaiters.getCount()) {
     StatusWaiter_t w;
     if(updateWaiters) {
@@ -864,10 +886,7 @@ void checkStatusNotification(){
       addStatus(content);
       statusPacketNo++;
       while(statusWaiters.getCount() > 0) {
-        Serial.print("Waiters ");
-        Serial.println(statusWaiters.getCount());
-        if(statusWaiters.pop(&w) != NULL) {
-          Serial.println("notifying waiter");
+        if(statusWaiters.pop(w) != NULL) {
           w.m_client.println("HTTP/1.1 200 OK");
           w.m_client.println("Content-Type: application/json");
           w.m_client.print("Content-Length: ");
@@ -875,27 +894,19 @@ void checkStatusNotification(){
           w.m_client.println("Connection: close");
           w.m_client.println();
           w.m_client.println(content);
-          Serial.println("stopping waiter");
           w.m_client.stop();
-          Serial.println("notified waiter");
-          delay(10);
         }
       }
-      Serial.println("Done updating waiters...");
       updateWaiters = false;
     } else {
-      Serial.println("Checking if anybody needs updating");
-      delay(1);
       // go through waiters reset
       unsigned long ms = millis();
       while(statusWaiters.peek() != NULL) {
-          if(ms - statusWaiters.peek()->m_added_ms < 6000) {
-            Serial.print("tail is good ");
-            Serial.println(ms - statusWaiters.peek()->m_added_ms);
+          if((ms - statusWaiters.peek()->m_added_ms) < 60000) {
             break;
           }
           StatusWaiter_t w;
-          if(statusWaiters.pop(&w) != NULL) {
+          if(statusWaiters.pop(w) != NULL) {
             Serial.println("Killing waiter");
             w.m_client.println("HTTP/1.1 204 No Content");
             w.m_client.println("Content-Type: none");
@@ -906,53 +917,60 @@ void checkStatusNotification(){
           }
        }
     }
-  } else {
-    Serial.println("no waiters...");
-  }*/
+  }
 }
 
-void webserverHandler( void * pvParameters ){
-  bool stopClient = true;
+void webserverHandler( void * pvParameters ) {
+
+  int contentLength = 0;
   while(true) {
-    WiFiClient cl = webServer.available();
-    if (cl) {
-      // a http request ends with a blank line
-      String str;
-      WebRequest_t req;
-//      Serial.println("New client");
-      bool done = false;
-      unsigned long start_ms;
-      while (!done) {
-        while (cl.available()) {
-          char c = cl.read();
-          str += c;
-          if(c == '\n') {
-            if(str == "\r\n") {
-              stopClient = (handleReq(cl,req.m_URL) == 0);
-              done = true;
-              break;
-            } else {
-              if(str.startsWith("GET")) {
-                str = str.substring(4,str.indexOf(' ',4));
-                req.m_URL = str;
-//                Serial.println(str);
+    if(webServer.hasClient()) {
+      WiFiClient cl = webServer.available();
+      if (cl) {
+        bool done = false;
+        contentLength = 0;
+        String str;
+        WebRequest_t req;
+        unsigned long start_ms;
+        while (!done) {
+          while (cl.available()) {
+            char c = cl.read();
+            str += c;
+            if(c == '\n') {
+              if(str == "\r\n") {
+                if(contentLength != 0) {
+                  int bytesRead = 0;
+                  while (cl.available() < contentLength) delay(1);
+                  while(bytesRead < contentLength) {
+                    c = cl.read();
+                    req.m_content += c;
+                    ++bytesRead;
+                  }
+                }
+                handleReq(cl,req.m_URL);
+                done = true;
+                break;
+              } else {
+                if(str.startsWith("GET")) {
+                  str = str.substring(4,str.indexOf(' ',4));
+                  req.m_URL = str;
+                } else if(str.startsWith(contentlengthstr)) {
+                  req.m_content = "";
+                  String cl = str.substring(strlen(contentlengthstr),str.indexOf('\r'));
+                  contentLength = cl.toInt(); 
+                }
               }
+              str = "";
             }
-            str = "";
           }
+          if(done) break;
+            delay(1);
         }
-        if(done) break;
-//        checkStatusNotification();
-          delay(1);
-      }
-      if(stopClient) {
-        // close the connection:
         cl.stop();
       }
-      delay(1);
     }
+    checkStatusNotification();
     delay(10);
-//    checkStatusNotification();
   }
 }
 
@@ -1240,7 +1258,6 @@ void addWifiNetworks() {
     }
   }
 }
-const char contentlengthstr[] = "Content-Length: ";
 
 void setupSystem() {
   WiFiClient setupClient = webServer.available();
