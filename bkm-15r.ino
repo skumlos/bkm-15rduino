@@ -118,7 +118,7 @@ EthernetClient monitorClient;
 WiFiServer webServer(80);
 
 uint8_t button_response[13];
-uint8_t packetBuf[40];
+uint8_t packetBuf[50];
 int wait_ms = 0;
 
 uint8_t sendInfoButtonPacket(const char* button) {
@@ -292,9 +292,11 @@ enum CommandType {
   CT_INFOKNOB
 };
 
+#define COMMAND_LEN (25)
+
 typedef struct {
   CommandType m_commandType;
-  char m_command[25];
+  char m_command[COMMAND_LEN];
 } Command_t;
 
 bool statusUpdated = false;
@@ -474,13 +476,38 @@ void addKnob(String& content, const char* name, const char* command) {
   content += name;
   content += "\n</div>\n";
 
-  content += "<input id='";
+  content += "<div style='text-align: left;'>";
+  content += "<input type='radio' id='";
   content += name;
-  content += "-factor";
-  content += "' class='knobinput' value='1'/>";
-  content += "<input id='";
+  content += "-val1' ";
+  content += "name='";
   content += name;
-  content += "' class='knobinput' value='1'/>";
+  content += "-val' value='1'>";
+  content += "<label for='";
+  content += name;
+  content += "-val1'>1</label><br>";
+
+  content += "<input type='radio' id='";
+  content += name;
+  content += "-val10' ";
+  content += "name='";
+  content += name;
+  content += "-val' value='10' checked/>";
+  content += "<label for='";
+  content += name;
+  content += "-val10'>10</label><br>";
+
+  content += "<input type='radio' id='";
+  content += name;
+  content += "-val100' ";
+  content += "name='";
+  content += name;
+  content += "-val' value='100'>";
+  content += "<label for='";
+  content += name;
+  content += "-val100'>100</label><br>";
+  content += "</div>";
+
   content += "<button class='knobmod' onclick='turnKnob(\"";
   content += name;
   content += "\",false)'>-</button>\n";
@@ -580,26 +607,28 @@ void handleReq(WiFiClient& wlclient, String& url) {
       "         let status = JSON.parse(xhttp.response);\n" \
       "         setState(status);\n" \
       "         waitStateUpdate();\n" \
-      "       } else if (this.status == 503) {\n" \
+      "         console.log(xhttp.response)\n" \
+      "       } else if (this.status == 204) {\n" \
+      "         console.log('waiter killed, retrying')\n" \
       "         waitStateUpdate();\n" \
       "       } else if (this.status == 503) {\n" \
       "         setTimeout(waitStateUpdate,500);\n" \
       "       }\n" \
-      "       console.log(xhttp.response)\n" \
       "    }\n" \
       "  };\n" \
       "  xhttp.send();\n" \
       "};\n";
     content += \
       "function turnKnob(knob,positive) {\n" \
-      "  let val = document.getElementById(knob);\n" \
-      "  let factor = document.getElementById(knob+'-factor');\n" \
+      "  let name = knob+'-val';\n" \
+      "  let selector = 'input[name=\"'+name+'\"]:checked';\n" \
+      "  let v = document.querySelector(selector).value;\n" \
       "  var xhttp = new XMLHttpRequest();\n" \
       "  xhttp.open('GET', '";
     content += knobURL;
     content += "'+knob+'/";
     content +="'+(positive?'p/':'n/')";
-    content +="+factor.value+'/'+val.value";
+    content +="+v+'/'+v";
     content += ", true);\n" \
       "  xhttp.send();\n" \
       "};\n";
@@ -785,7 +814,11 @@ void handleReq(WiFiClient& wlclient, String& url) {
         if(factor == 0 || value == 0) throw false;
 
         Command_t cmd;
-        snprintf(cmd.m_command,20,"R %s 96/%s%d/%d",knobstr,pos ? "" : "-" , factor,value);
+        if(pos) {
+          snprintf(cmd.m_command,COMMAND_LEN,"R %s 96/%d/%d",knobstr, factor, value);
+        } else {
+          snprintf(cmd.m_command,COMMAND_LEN,"R %s 96/-%d/%d",knobstr, factor, value);          
+        }
         cmd.m_commandType = CT_INFOKNOB;
      
         bool full = false;
@@ -859,18 +892,16 @@ void checkStatusNotification(){
       // go through waiters reset
       unsigned long ms = millis();
       while(statusWaiters.peek() != NULL) {
-          if((ms - statusWaiters.peek()->m_added_ms) < 60000) {
+          if((ms - statusWaiters.peek()->m_added_ms) < 30000) {
             break;
           }
           StatusWaiter_t w;
           if(statusWaiters.pop(w) != NULL) {
-            Serial.println("Killing waiter");
             w.m_client.println("HTTP/1.1 204 No Content");
             w.m_client.println("Content-Type: none");
             w.m_client.println("Connection: close");
             w.m_client.println();
             w.m_client.stop();
-            Serial.println("Killed waiter");
           }
        }
     }
