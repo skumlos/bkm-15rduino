@@ -3,10 +3,10 @@
 #include <WiFi.h>
 #include <Preferences.h>
 
-#define LED         (2)   // Status LED
-#define FORCE_SETUP (27)  // If low during boot, will make the board enter setup mode
+#define LED                 (2)   // Status LED
+#define FORCE_SETUP         (27)  // If low during boot, will make the board enter setup mode
 
-#define RECV_TIMEOUT (1000)
+#define RECV_TIMEOUT        (1000)
 
 // Keys for preferences
 #define KEY_SSID      "ssid"
@@ -47,7 +47,7 @@
 
 // Status buttons
 #define POWER_BUTTON        "POWER"
-#define DEGAUSS_BUTTON     "DEGAUSS"
+#define DEGAUSS_BUTTON      "DEGAUSS"
 
 #define SCANMODE_BUTTON     "SCANMODE"
 #define HDELAY_BUTTON       "HDELAY"
@@ -107,40 +107,15 @@ Preferences preferences;
 IPAddress ip(192,168,0,100);
 IPAddress monitorIP(192,168,0,1);
 
-const uint8_t get_status[31] = { 0x03,0x0b,0x53,0x4f,0x4e,0x59,0x00,0x00,0x00,0xb0,0x00,0x00,0x12,0x53,0x54,0x41,0x54,0x67,0x65,0x74,0x20,0x43,0x55,0x52,0x52,0x45,0x4e,0x54,0x20,0x35,0x00 };
+const uint8_t header [13] =     { 0x03, 0x0B, 'S', 'O', 'N', 'Y', 0x00, 0x00, 0x00, 0xB0, 0x00, 0x00, 0x00 };
+const uint8_t get_status[31] =  { 0x03, 0x0b, 0x53, 0x4f, 0x4e, 0x59, 0x00, 0x00, 0x00, 0xb0, 0x00, 0x00, 0x12, 0x53, 0x54, 0x41,
+                                  0x54, 0x67, 0x65, 0x74, 0x20, 0x43, 0x55, 0x52, 0x52, 0x45, 0x4e, 0x54, 0x20, 0x35, 0x00 };
 
 uint8_t status_response[53];
 
 EthernetClient monitorClient;
 
 WiFiServer webServer(80);
-
-enum Knobs {
-    KNOB_PHASE,
-    KNOB_CHROMA,
-    KNOB_BRIGHT,
-    KNOB_CONTRAST
-};
-
-typedef struct {
-  Knobs m_knob;
-  bool m_positive;
-  uint8_t m_factor;  
-  uint8_t m_value;
-} KnobAction_t;
-
-#define MAX_KNOBACTIONS (4)
-
-typedef struct {
-  KnobAction_t m_actions[MAX_KNOBACTIONS];  
-  uint8_t m_actionCnt;
-} KnobActions_t;
-
-KnobActions_t knobActions;
-
-char knobStatus[20];
-
-const char header [13] = { 0x03, 0x0B, 'S', 'O', 'N', 'Y', 0x00, 0x00, 0x00, 0xB0, 0x00, 0x00, 0x00 };
 
 uint8_t button_response[13];
 uint8_t packetBuf[40];
@@ -181,6 +156,7 @@ uint8_t sendStatusButtonTogglePacket(const char* button) {
     memcpy(packetBuf+dataLength, button, strlen(button));
     dataLength += strlen(button);
     packetBuf[dataLength++] = 0x20;
+    // FIXME no toggle for DEGAUSSS
     memcpy(packetBuf+dataLength, TOGGLE, strlen(TOGGLE));
     dataLength += strlen(TOGGLE);
     if(monitorClient.write(packetBuf, dataLength) == dataLength) {
@@ -200,37 +176,15 @@ uint8_t sendStatusButtonTogglePacket(const char* button) {
     return 1;
 }
 
-void turnKnob(Knobs knob, int8_t dir, uint8_t ticks) {
+uint8_t sendInfoKnobPacket(const char* knobcmd) {
     uint8_t dataLength = sizeof(header)-1;
-    const char *knobstr = NULL;
 
-    snprintf(knobStatus,20,"96/%d/%d",dir,ticks);
-
-    switch(knob) {
-        case KNOB_PHASE:
-            knobstr = INFO_KNOB_PHASE;
-        break;
-        case KNOB_CHROMA:
-            knobstr = INFO_KNOB_CHROMA;
-        break;
-        case KNOB_BRIGHT:
-            knobstr = INFO_KNOB_BRIGHTNESS;
-        break;
-        case KNOB_CONTRAST:
-        default:
-            knobstr = INFO_KNOB_CONTRAST;
-        break;
-    }
-
-    packetBuf[dataLength++] = strlen(INFO_KNOB) + strlen(knobstr) + strlen(knobStatus) + 2;
+    packetBuf[dataLength++] = strlen(INFO_KNOB) + strlen(knobcmd) + 1;
     memcpy(packetBuf+dataLength, INFO_KNOB, strlen(INFO_KNOB));
     dataLength += strlen(INFO_KNOB);
     packetBuf[dataLength++] = 0x20;
-    memcpy(packetBuf+dataLength, knobstr, strlen(knobstr));
-    dataLength += strlen(knobstr);
-    packetBuf[dataLength++] = 0x20;
-    memcpy(packetBuf+dataLength, knobStatus, strlen(knobStatus));
-    dataLength += strlen(knobStatus);
+    memcpy(packetBuf+dataLength, knobcmd, strlen(knobcmd));
+    dataLength += strlen(knobcmd);
     if(monitorClient.write(packetBuf, dataLength) == dataLength) {
       wait_ms = 0;
       while(monitorClient.available() < sizeof(button_response)) {
@@ -238,13 +192,14 @@ void turnKnob(Knobs knob, int8_t dir, uint8_t ticks) {
         ++wait_ms;
         if(wait_ms >= RECV_TIMEOUT) break;
       }
-      if(wait_ms >= RECV_TIMEOUT) return;
+      if(wait_ms >= RECV_TIMEOUT) return 1;
+      
       uint8_t bytesRead = 0;
       while(bytesRead < sizeof(button_response))
         button_response[bytesRead++] = monitorClient.read();
-      return;
+      return 0;
     }
-    return;
+    return 1;
 }
 
 TaskHandle_t webServerTask;
@@ -330,15 +285,16 @@ private:
   void* m_queueData; 
 };
 
-#define MAX_QUEUELEN (5)
+#define MAX_QUEUELEN (8)
 enum CommandType {
   CT_STATUS,
-  CT_INFO  
+  CT_INFO,
+  CT_INFOKNOB
 };
 
 typedef struct {
   CommandType m_commandType;
-  char m_command[20];
+  char m_command[25];
 } Command_t;
 
 bool statusUpdated = false;
@@ -356,7 +312,7 @@ typedef struct {
   unsigned long m_added_ms;
 } StatusWaiter_t;
 
-#define MAX_WAITERS (4)
+#define MAX_WAITERS (2)
 // due to smart pointers in wificlient
 class WaiterQueue {
 public:
@@ -795,71 +751,72 @@ void handleReq(WiFiClient& wlclient, String& url) {
       wlclient.println();
     }
   } else if(url.startsWith(knobURL)) {
-    if(knobActions.m_actionCnt < MAX_KNOBACTIONS) {
-      try {
-        Knobs knob = (Knobs)-1;
-        int p = url.indexOf('/',sizeof(knobURL)+1);
-        int p2 = url.indexOf('/',p+1);
-        int p3 = url.indexOf('/',p2+1);
-        if(p != -1 && p2 != -1 && p3 != -1) {
-          String knobstr = url.substring(strlen(knobURL),p);
-          String posstr = url.substring(p+1,p2);
-          String factorstr = url.substring(p2+1,p3);
-          String valuestr = url.substring(p3+1);
-          bool pos = true;
-          
-          if(knobstr == "PHASE") {
-            knob = KNOB_PHASE;
-          } else if (knobstr == "CHROMA") {
-            knob = KNOB_CHROMA;
-          } else if (knobstr == "BRIGHTNESS") {        
-            knob = KNOB_BRIGHT;
-          } else if (knobstr == "CONTRAST") {
-            knob = KNOB_CONTRAST;
-          } else {
-            throw false;
-          }
+    try {
+      int p = url.indexOf('/',sizeof(knobURL)+1);
+      int p2 = url.indexOf('/',p+1);
+      int p3 = url.indexOf('/',p2+1);
+      if(p != -1 && p2 != -1 && p3 != -1) {
+        String knobstr = url.substring(strlen(knobURL),p);
+        String posstr = url.substring(p+1,p2);
+        String factorstr = url.substring(p2+1,p3);
+        String valuestr = url.substring(p3+1);
+        bool pos = true;
+        
+        if(knobstr != "PHASE" &&
+           knobstr != "CHROMA" &&
+           knobstr != "BRIGHTNESS" &&
+           knobstr != "CONTRAST")
+        {
+          Serial.print("Unknown knob: '");
+          Serial.print(knobstr);
+          Serial.println("'");
+          throw false;
+        }
 
-          if(posstr == "n") {
-            pos = false;
-          } else if(posstr == "p") {
-            pos = true;
-          } else {
-            throw false;
-          }
-          int factor = factorstr.toInt();
-          int value = valuestr.toInt();
-          if(factor == 0 || value == 0) throw false;
- 
-          xSemaphoreTake(state_sem, portMAX_DELAY);    
-          KnobAction_t& action = knobActions.m_actions[knobActions.m_actionCnt];
-          action.m_knob = knob;
-          action.m_positive = pos;
-          action.m_factor = factor;
-          action.m_value = value;
-          knobActions.m_actionCnt++;
-          xSemaphoreGive(state_sem);
-    
+        if(posstr == "n") {
+          pos = false;
+        } else if(posstr == "p") {
+          pos = true;
+        } else {
+          throw false;
+        }
+        int factor = factorstr.toInt();
+        int value = valuestr.toInt();
+        if(factor == 0 || value == 0) throw false;
+
+        Command_t cmd;
+        snprintf(cmd.m_command,20,"R %s 96/%s%d/%d",knobstr,pos ? "" : "-" , factor,value);
+        cmd.m_commandType = CT_INFOKNOB;
+     
+        bool full = false;
+        xSemaphoreTake(state_sem, portMAX_DELAY);    
+        if(commandQueue.getCount() < MAX_QUEUELEN) {
+          commandQueue.push(&cmd);
+        } else {
+          full = true;
+        }
+        xSemaphoreGive(state_sem);
+        if(!full) {
           wlclient.println("HTTP/1.1 200 OK");
           wlclient.println("Content-Type: none");
           wlclient.println("Connection: close");
           wlclient.println();
         } else {
-          throw false;
+          wlclient.println("HTTP/1.1 503 Service Unavailable");
+          wlclient.println("Content-Type: none");
+          wlclient.println("Connection: close");
+          wlclient.println();
         }
-      } catch(const bool ex) {
-        Serial.print("Failed deciphering knob request '");
-        Serial.println(url);
-        wlclient.println("HTTP/1.1 404 Not Found");
-        wlclient.println("Connection: close");
-        wlclient.println();    
-      }      
-    } else {
-      wlclient.println("HTTP/1.1 503 Service Unavailable");
-      wlclient.println("Content-Type: none");
+      } else {
+        throw false;
+      }
+    } catch(const bool ex) {
+      Serial.print("Failed deciphering knob request '");
+      Serial.println(url);
+      wlclient.println("HTTP/1.1 404 Not Found");
       wlclient.println("Connection: close");
-      wlclient.println();
-    }      
+      wlclient.println();    
+    }            
   } else {
     wlclient.println("HTTP/1.1 404 Not Found");
     wlclient.println("Connection: close");
@@ -1083,9 +1040,6 @@ void setup() {
     memcpy(packetBuf,header,sizeof(header));
     
     currentState.m_linkUp = (Ethernet.linkStatus() == LinkON);
-//    commandQueue.m_queueLen = 0;
-//    statusWaiters.m_waiterCnt = 0;
-    knobActions.m_actionCnt = 0;
     
     Serial.println("Starting WebServer");
     webServer.begin();
@@ -1394,18 +1348,9 @@ void loop() {
     } else {
       Command_t c;
       Command_t* cmd = NULL;
-      KnobAction_t* knobAction = NULL;
+      
       xSemaphoreTake(state_sem, portMAX_DELAY);
       cmd = commandQueue.pop(&c);
-      // FIXME * * * * * * * * * * * * * * * * * * *
-//      if(commandQueue.m_queueLen > 0) {
-//        cmd = &commandQueue.m_commands[commandQueue.m_queueLen-1];
-//        commandQueue.m_queueLen--;
-//      }
-      if(knobActions.m_actionCnt > 0) {
-        knobAction = &(knobActions.m_actions[knobActions.m_actionCnt-1]);
-        knobActions.m_actionCnt--;
-      }    
       xSemaphoreGive(state_sem);        
     
       if(NULL != cmd) {
@@ -1416,13 +1361,12 @@ void loop() {
           case CT_STATUS:
             sendStatusButtonTogglePacket(cmd->m_command);
           break;
+          case CT_INFOKNOB:
+            sendInfoKnobPacket(cmd->m_command);
+          break;
         }
       }
     
-      if(NULL != knobAction) {
-        turnKnob(knobAction->m_knob,knobAction->m_factor * (knobAction->m_positive ? 1 : -1),knobAction->m_value);
-      }
-
       if(millis() - lastStatusUpdate_ms >= 150) {
         updateStatus();
         lastStatusUpdate_ms = millis();
