@@ -16,6 +16,10 @@
  * VIN       -> 5V (assuming a 5V power to ESP32)
  * GND       -> GND
  *
+ * Some modules seemingly runs on 3.3V directly, and thus doesn't have a regulator
+ * like mine does. In that case, you should of course run 3.3V to VCC of the module
+ * instead.
+ *
  * The "Preferences" library is used to store the network credentials, so on initial
  * boot, if nothing is in, it starts up making a SoftAP called "BKM-15R-Setup" with
  * "adminadmin" as the PSK. Connecting to that and browsing to 192.168.4.1 should
