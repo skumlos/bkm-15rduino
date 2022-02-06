@@ -1,17 +1,44 @@
-// Arduino based BKM-15R implementation, for ESP32 with ENC28J60 module.
-// (2022) Martin Hejnfelt (martin@hejnfelt.com)
-//
-// Besides the obvious ESP32 support, you also need EthernetENC library.
-// Tested with a (DOIT?) ESP32 Devkit V1 and a "large" ENC28J60 module connected to
-// the ESP32 on VSPI (19 - MISO, 18 - CLK, 5 - CS, 23 - MOSI).
-//
-// The "Preferences" library is used to store the network credentials, so on initial
-// boot, if nothing is in, it starts up making a SoftAP called "BKM-15R-Setup" with
-// "adminadmin" as the PSK. Connecting to that and browsing to 192.168.4.1 should
-// give a *very* basic setup page where SSID and PSK can be entered. Note there is zero
-// SSL and whatnot, assume your WiFi is now compromised and will never work again.
-// If you need to redo this, power up with GPIO27 pulled to GND, and it will return
-// to setup mode.
+/* 
+ * Arduino based BKM-15R implementation, for ESP32 with ENC28J60 module.
+ * (2022) Martin Hejnfelt (martin@hejnfelt.com)
+ *
+ * Protocol is described in detail here: https://immerhax.com/?p=797
+ *
+ * Besides the obvious ESP32 support, you also need EthernetENC library (or whatever
+ * if you choose another Ethernet module).
+ * Tested with a (DOIT?) ESP32 Devkit V1 and a "large" ENC28J60 module connected to
+ * the ESP32 on VSPI: 
+ * ESP32        ENC28J60
+ * 19 / MISO -> SO 
+ * 18 / CLK  -> SCK
+ *  5 / CS   -> CS
+ * 23 / MOSI -> ST
+ * VIN       -> 5V (assuming a 5V power to ESP32)
+ * GND       -> GND
+ *
+ * The "Preferences" library is used to store the network credentials, so on initial
+ * boot, if nothing is in, it starts up making a SoftAP called "BKM-15R-Setup" with
+ * "adminadmin" as the PSK. Connecting to that and browsing to 192.168.4.1 should
+ * give a *very* basic setup page where SSID and PSK can be entered. Note there is zero
+ * SSL and whatnot, assume your WiFi is now compromised and will never work again.
+ * If you need to redo this, power up with GPIO27 pulled to GND, and it will return
+ * to setup mode.
+ * 
+ * Use a crossed network cable between monitor and ENC28J60 or a switch inbetween.
+ * 
+ * The LED blink pattern on the ESP32 has some "meaning":
+ * Off - Setup mode
+ * On  - No connection to Ethernet module
+ * 1 Short - Waiting for initial wifi connection
+ * 2 Short - Waiting for ethernet link
+ * 3 Short - Waiting for connection to monitor 
+ * Blinking 50/50 - Communication is up
+ * 
+ * 06/02/2022 - Initial version 0.1
+ */
+
+#define VERSION_MAJOR       (0)
+#define VERSION_MINOR       (1)
 
 #include <SPI.h>
 #include <EthernetENC.h>
@@ -23,7 +50,7 @@
 
 #define RECV_TIMEOUT        (1000)
 
-// Keys for preferences
+// Keys for Preferences, do NOT edit these to actually be your SSID and password
 #define KEY_SSID      "ssid"
 #define KEY_PASSWORD  "password"
 
@@ -128,6 +155,186 @@ const uint8_t get_status[31] =  { 0x03, 0x0b, 0x53, 0x4f, 0x4e, 0x59, 0x00, 0x00
 
 uint8_t status_response[53];
 
+IPAddress ap_ip(192,168,4,1);
+IPAddress ap_gw(192,168,4,1);
+IPAddress ap_subnet(255,255,255,0);
+
+unsigned long lastStatusUpdate_ms = 0;
+
+bool updateWaiters = false;
+
+TaskHandle_t webServerTask;
+TaskHandle_t wifiConnectionTask;
+TaskHandle_t ledTask;
+
+SemaphoreHandle_t state_sem;
+
+typedef struct {
+  bool m_linkUp;
+  bool m_connected;
+  bool m_isValid;
+  bool m_isPowered;
+  bool m_scanmode;
+  bool m_hdelay;
+  bool m_vdelay;
+  bool m_charmute;
+  bool m_monochrome;
+  bool m_marker;
+  bool m_extsync;
+  bool m_apt;
+  bool m_chromaup;
+  bool m_aspect;
+
+  bool m_coltemp;
+  bool m_comb;
+  bool m_blueonly;
+  bool m_rcutoff;
+  bool m_gcutoff;
+  bool m_bcutoff;
+  bool m_man_phase;
+  bool m_man_chroma;
+  bool m_man_bright;
+  bool m_man_contrast;
+} State_t;
+
+typedef struct {
+  String m_URL;
+  String m_content;
+} WebRequest_t;
+
+template <typename T>
+class Queue {
+public:
+  Queue(const uint8_t queueLen) : m_maxCount(queueLen), m_count(0)
+  {
+    m_queueData = malloc(queueLen*sizeof(T));
+    m_head = 0;
+    m_tail = 0;
+  };
+
+  T* peek() {
+    if(m_count == 0) return NULL;    
+    return &((T*)m_queueData)[m_tail];;
+  };
+
+  T* pop(T* t) {
+    if(m_count == 0) return NULL;
+    memcpy(t,&((T*)m_queueData)[m_tail],sizeof(T));
+    
+    ++m_tail;
+    --m_count;
+    if(m_tail >= m_maxCount) m_tail = 0;
+    return t;
+  };
+
+  void push(T* t) {
+    if(m_count + 1 > m_maxCount) return;
+    memcpy(&((T*)m_queueData)[m_head],t,sizeof(T));
+    ++m_head;
+    ++m_count;
+    if(m_head >= m_maxCount) m_head = 0;
+  };
+
+  uint8_t getCount() {
+     return m_count;
+  };
+ 
+private:
+  uint8_t m_maxCount;
+  uint8_t m_tail;
+  uint8_t m_head;
+  uint8_t m_count;
+  void* m_queueData; 
+};
+
+#define MAX_QUEUELEN (8)
+
+enum CommandType {
+  CT_STATUS,
+  CT_INFO,
+  CT_INFOKNOB
+};
+
+#define COMMAND_LEN (25)
+
+typedef struct {
+  CommandType m_commandType;
+  char m_command[COMMAND_LEN];
+} Command_t;
+
+bool statusUpdated = false;
+
+uint16_t statusw1 = 0xFFFF,_statusw1 = 0xFFFF;
+uint16_t statusw2 = 0xFFFF,_statusw2 = 0xFFFF;
+uint16_t statusw3 = 0xFFFF,_statusw3 = 0xFFFF;
+uint16_t statusw4 = 0xFFFF,_statusw4 = 0xFFFF;
+uint16_t statusw5 = 0xFFFF,_statusw5 = 0xFFFF;
+
+typedef struct {
+  // the associated connection
+  WiFiClient m_client;  
+  // when was the waiter added
+  unsigned long m_added_ms;
+} StatusWaiter_t;
+
+#define MAX_WAITERS (2)
+// due to smart pointers in wificlient
+class WaiterQueue {
+public:
+  WaiterQueue() : m_maxCount(MAX_WAITERS), m_count(0)
+  {
+    m_head = 0;
+    m_tail = 0;
+  };
+
+  StatusWaiter_t* peek() {
+    if(m_count == 0) return NULL;    
+    return &(m_waiters[m_tail]);
+  };
+
+  StatusWaiter_t* pop(StatusWaiter_t& t) {
+    if(m_count == 0) return NULL;
+    t = m_waiters[m_tail];
+    m_waiters[m_tail].m_client.stop();
+    ++m_tail;
+    --m_count;
+    if(m_tail >= m_maxCount) m_tail = 0;
+    return &t;
+  };
+
+  void push(StatusWaiter_t& t) {
+    if(m_count + 1 > m_maxCount) return;
+    m_waiters[m_tail] = t;
+    ++m_head;
+    ++m_count;
+    if(m_head >= m_maxCount) m_head = 0;
+  };
+
+  uint8_t getCount() {
+     return m_count;
+  };
+ 
+private:
+  uint8_t m_maxCount;
+  uint8_t m_tail;
+  uint8_t m_head;
+  uint8_t m_count;
+  StatusWaiter_t m_waiters[MAX_WAITERS];
+};
+
+WaiterQueue statusWaiters;
+
+const char toggleURL[]      = "/toggle/";
+const char knobURL[]        = "/turnknob/";
+const char infoPushURL[]    = "/infopush/";
+const char statusGetURL[]   = "/statusget";
+const char statusWaitURL[] = "/statuswait";
+
+State_t currentState = { .m_linkUp = false, .m_connected = false, .m_isValid = false, .m_isPowered = false };
+State_t stateCopy;
+
+Queue<Command_t> commandQueue(MAX_QUEUELEN);
+
 EthernetClient monitorClient;
 
 WiFiServer webServer(80);
@@ -216,176 +423,6 @@ uint8_t sendInfoKnobPacket(const char* knobcmd) {
     }
     return 1;
 }
-
-TaskHandle_t webServerTask;
-TaskHandle_t ledTask;
-
-SemaphoreHandle_t state_sem;
-
-typedef struct {
-  bool m_linkUp;
-  bool m_connected;
-  bool m_isValid;
-  bool m_isPowered;
-  bool m_scanmode;
-  bool m_hdelay;
-  bool m_vdelay;
-  bool m_charmute;
-  bool m_monochrome;
-  bool m_marker;
-  bool m_extsync;
-  bool m_apt;
-  bool m_chromaup;
-  bool m_aspect;
-
-  bool m_coltemp;
-  bool m_comb;
-  bool m_blueonly;
-  bool m_rcutoff;
-  bool m_gcutoff;
-  bool m_bcutoff;
-  bool m_man_phase;
-  bool m_man_chroma;
-  bool m_man_bright;
-  bool m_man_contrast;
-} State_t;
-
-typedef struct {
-  String m_URL;
-  String m_content;
-} WebRequest_t;
-
-template <typename T>
-class Queue {
-public:
-  Queue(const uint8_t queueLen) : m_maxCount(queueLen), m_count(0)
-  {
-    m_queueData = malloc(queueLen*sizeof(T));
-    m_head = 0;
-    m_tail = 0;
-  };
-
-  T* peek() {
-    if(m_count == 0) return NULL;    
-    return &((T*)m_queueData)[m_tail];;
-  };
-
-  T* pop(T* t) {
-    if(m_count == 0) return NULL;
-    memcpy(t,&((T*)m_queueData)[m_tail],sizeof(T));
-    
-    ++m_tail;
-    --m_count;
-    if(m_tail >= m_maxCount) m_tail = 0;
-    return t;
-  };
-
-  void push(T* t) {
-    if(m_count + 1 > m_maxCount) return;
-    memcpy(&((T*)m_queueData)[m_head],t,sizeof(T));
-    ++m_head;
-    ++m_count;
-    if(m_head >= m_maxCount) m_head = 0;
-  };
-
-  uint8_t getCount() {
-     return m_count;
-  };
- 
-private:
-  uint8_t m_maxCount;
-  uint8_t m_tail;
-  uint8_t m_head;
-  uint8_t m_count;
-  void* m_queueData; 
-};
-
-#define MAX_QUEUELEN (8)
-enum CommandType {
-  CT_STATUS,
-  CT_INFO,
-  CT_INFOKNOB
-};
-
-#define COMMAND_LEN (25)
-
-typedef struct {
-  CommandType m_commandType;
-  char m_command[COMMAND_LEN];
-} Command_t;
-
-bool statusUpdated = false;
-
-uint16_t statusw1 = 0xFFFF,_statusw1 = 0xFFFF;
-uint16_t statusw2 = 0xFFFF,_statusw2 = 0xFFFF;
-uint16_t statusw3 = 0xFFFF,_statusw3 = 0xFFFF;
-uint16_t statusw4 = 0xFFFF,_statusw4 = 0xFFFF;
-uint16_t statusw5 = 0xFFFF,_statusw5 = 0xFFFF;
-
-typedef struct {
-  // the associated connection
-  WiFiClient m_client;  
-  // when was the waiter added
-  unsigned long m_added_ms;
-} StatusWaiter_t;
-
-#define MAX_WAITERS (2)
-// due to smart pointers in wificlient
-class WaiterQueue {
-public:
-  WaiterQueue() : m_maxCount(MAX_WAITERS), m_count(0)
-  {
-    m_head = 0;
-    m_tail = 0;
-  };
-
-  StatusWaiter_t* peek() {
-    if(m_count == 0) return NULL;    
-    return &(m_waiters[m_tail]);
-  };
-
-  StatusWaiter_t* pop(StatusWaiter_t& t) {
-    if(m_count == 0) return NULL;
-    t = m_waiters[m_tail];
-    m_waiters[m_tail].m_client.stop();
-    ++m_tail;
-    --m_count;
-    if(m_tail >= m_maxCount) m_tail = 0;
-    return &t;
-  };
-
-  void push(StatusWaiter_t& t) {
-    if(m_count + 1 > m_maxCount) return;
-    m_waiters[m_tail] = t;
-    ++m_head;
-    ++m_count;
-    if(m_head >= m_maxCount) m_head = 0;
-  };
-
-  uint8_t getCount() {
-     return m_count;
-  };
- 
-private:
-  uint8_t m_maxCount;
-  uint8_t m_tail;
-  uint8_t m_head;
-  uint8_t m_count;
-  StatusWaiter_t m_waiters[MAX_WAITERS];
-};
-
-WaiterQueue statusWaiters;
-
-const char toggleURL[]      = "/toggle/";
-const char knobURL[]        = "/turnknob/";
-const char infoPushURL[]    = "/infopush/";
-const char statusGetURL[]   = "/statusget";
-const char statusWaitURL[] = "/statuswait";
-
-State_t currentState = { .m_linkUp = false, .m_connected = false, .m_isValid = false, .m_isPowered = false };
-State_t stateCopy;
-
-Queue<Command_t> commandQueue(MAX_QUEUELEN);
 
 void addToggleButton(String& content, const char* command, const char* name, bool large = false, bool hasIndicator = true) {
   content += "<div class='togglediv'>\n" \
@@ -872,8 +909,6 @@ void handleReq(WiFiClient& wlclient, String& url) {
   }
 }
 
-bool updateWaiters = false;
-
 void checkStatusNotification(){
   xSemaphoreTake(state_sem, portMAX_DELAY);    
   if(statusUpdated) {
@@ -924,7 +959,6 @@ void checkStatusNotification(){
 }
 
 void webserverHandler( void * pvParameters ) {
-
   int contentLength = 0;
   while(true) {
     if(webServer.hasClient()) {
@@ -977,6 +1011,22 @@ void webserverHandler( void * pvParameters ) {
   }
 }
 
+void wifiConnectionHandler( void * pvParameters ){
+  while(true) {
+    while (WiFi.status() == WL_CONNECTED) {
+        delay(5000);
+    }
+    Serial.println("WiFi disconnected, reconnecting...");
+    WiFi.reconnect();
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(1000);
+    }    
+    Serial.println("WiFi reconnected...");
+    Serial.print("Local IP: ");
+    Serial.println(WiFi.localIP());
+  }
+}
+
 void statusLEDBlinker( void * pvParameters ){
   while(true) {
     if(!currentState.m_linkUp) {
@@ -1010,10 +1060,6 @@ void statusLEDBlinker( void * pvParameters ){
     }
   }
 }
-
-IPAddress ap_ip(192,168,4,1);
-IPAddress ap_gw(192,168,4,1);
-IPAddress ap_subnet(255,255,255,0);
  
 void setup() {
   pinMode(LED,OUTPUT);
@@ -1021,7 +1067,11 @@ void setup() {
  
   Serial.begin(115200);
 
-  Serial.println("\n\nBKM-15Rduino");
+  Serial.println("\n\nBKM-15Rduino"); // name shamelessly inspired by Aaron Bonhams BKM-10Rduino, sry!
+  Serial.print("Version: ");
+  Serial.print(VERSION_MAJOR);
+  Serial.print('.');
+  Serial.println(VERSION_MINOR);
   Serial.println("(2022) Martin Hejnfelt (martin@hejnfelt.com)");
   Serial.println("www.immerhax.com\n\n");
 
@@ -1077,28 +1127,29 @@ void setup() {
     Serial.print("Connecting to SSID '");
     Serial.print(ssid);
     Serial.println("'");
+
     while (WiFi.status() != WL_CONNECTED) {
         digitalWrite(LED,HIGH);
         delay(100);
         digitalWrite(LED,LOW);
         delay(500);
     }
+    Serial.print("Local IP: ");
+    Serial.println(WiFi.localIP());
+
     memcpy(packetBuf,header,sizeof(header));
     
     currentState.m_linkUp = (Ethernet.linkStatus() == LinkON);
     
     Serial.println("Starting WebServer");
-    webServer.begin();
-    
-    Serial.println(WiFi.localIP());
+    webServer.begin();    
 
     //create a task to run the webserver stuff on core 0, as core 1 is default
     xTaskCreatePinnedToCore(webserverHandler, "Webserver", 40000, NULL, 1, &webServerTask, 0);
     xTaskCreatePinnedToCore(statusLEDBlinker, "LED Blinker", 1000, NULL, 2, &ledTask, 0);
+    xTaskCreatePinnedToCore(wifiConnectionHandler, "Wifi Connection", 1000, NULL, 3, &wifiConnectionTask, 0);
   }
 }
-
-unsigned long lastStatusUpdate_ms = 0;
 
 void updateStatus() {
   monitorClient.write(get_status,sizeof(get_status));
