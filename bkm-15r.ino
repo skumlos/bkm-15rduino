@@ -1,3 +1,18 @@
+// Arduino based BKM-15R implementation, for ESP32 with ENC28J60 module.
+// (2022) Martin Hejnfelt (martin@hejnfelt.com)
+//
+// Besides the obvious ESP32 support, you also need EthernetENC library.
+// Tested with a (DOIT?) ESP32 Devkit V1 and a "large" ENC28J60 module connected to
+// the ESP32 on VSPI (19 - MISO, 18 - CLK, 5 - CS, 23 - MOSI).
+//
+// The "Preferences" library is used to store the network credentials, so on initial
+// boot, if nothing is in, it starts up making a SoftAP called "BKM-15R-Setup" with
+// "adminadmin" as the PSK. Connecting to that and browsing to 192.168.4.1 should
+// give a *very* basic setup page where SSID and PSK can be entered. Note there is zero
+// SSL and whatnot, assume your WiFi is now compromised and will never work again.
+// If you need to redo this, power up with GPIO27 pulled to GND, and it will return
+// to setup mode.
+
 #include <SPI.h>
 #include <EthernetENC.h>
 #include <WiFi.h>
