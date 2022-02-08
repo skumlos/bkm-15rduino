@@ -38,11 +38,12 @@
  * 3 Short - Waiting for connection to monitor 
  * Blinking 50/50 - Communication is up
  * 
+ * 08/02/2022 - Version 0.2
  * 06/02/2022 - Initial version 0.1
  */
 
 #define VERSION_MAJOR       (0)
-#define VERSION_MINOR       (1)
+#define VERSION_MINOR       (2)
 
 #include <SPI.h>
 #include <EthernetENC.h>
