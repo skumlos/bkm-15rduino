@@ -166,6 +166,7 @@ IPAddress ap_subnet(255,255,255,0);
 unsigned long lastStatusUpdate_ms = 0;
 
 bool updateWaiters = false;
+bool wifiConnected = false;
 
 TaskHandle_t webServerTask;
 TaskHandle_t wifiConnectionTask;
@@ -382,9 +383,10 @@ uint8_t sendStatusButtonTogglePacket(const char* button) {
     memcpy(packetBuf+dataLength, button, strlen(button));
     dataLength += strlen(button);
     packetBuf[dataLength++] = 0x20;
-    // FIXME no toggle for DEGAUSSS
-    memcpy(packetBuf+dataLength, TOGGLE, strlen(TOGGLE));
-    dataLength += strlen(TOGGLE);
+    if(button != DEGAUSS_BUTTON) {
+      memcpy(packetBuf+dataLength, TOGGLE, strlen(TOGGLE));
+      dataLength += strlen(TOGGLE);
+    }
     if(monitorClient.write(packetBuf, dataLength) == dataLength) {
       wait_ms = 0;
       while(monitorClient.available() < sizeof(button_response)) {
@@ -973,41 +975,49 @@ void webserverHandler( void * pvParameters ) {
         String str;
         WebRequest_t req;
         unsigned long start_ms;
-        while (!done) {
-          while (cl.available()) {
-            char c = cl.read();
-            str += c;
-            if(c == '\n') {
-              if(str == "\r\n") {
-                if(contentLength != 0) {
-                  int bytesRead = 0;
-                  while (cl.available() < contentLength) delay(1);
-                  while(bytesRead < contentLength) {
-                    c = cl.read();
-                    req.m_content += c;
-                    ++bytesRead;
+        try {
+          while (!done) {
+            if(!cl.connected()) throw false;
+            while (cl.available()) {
+              char c = cl.read();
+              str += c;
+              if(c == '\n') {
+                if(str == "\r\n") {
+                  if(contentLength != 0) {
+                    int bytesRead = 0;
+                    while (cl.available() < contentLength) {
+                      delay(1);
+                      if(!cl.connected()) throw false;
+                    }
+                    while(bytesRead < contentLength) {
+                      c = cl.read();
+                      req.m_content += c;
+                      ++bytesRead;
+                    }
+                  }
+                  handleReq(cl,req.m_URL);
+                  done = true;
+                  break;
+                } else {
+                  if(str.startsWith("GET")) {
+                    str = str.substring(4,str.indexOf(' ',4));
+                    req.m_URL = str;
+                  } else if(str.startsWith(contentlengthstr)) {
+                    req.m_content = "";
+                    String cl = str.substring(strlen(contentlengthstr),str.indexOf('\r'));
+                    contentLength = cl.toInt(); 
                   }
                 }
-                handleReq(cl,req.m_URL);
-                done = true;
-                break;
-              } else {
-                if(str.startsWith("GET")) {
-                  str = str.substring(4,str.indexOf(' ',4));
-                  req.m_URL = str;
-                } else if(str.startsWith(contentlengthstr)) {
-                  req.m_content = "";
-                  String cl = str.substring(strlen(contentlengthstr),str.indexOf('\r'));
-                  contentLength = cl.toInt(); 
-                }
+                str = "";
               }
-              str = "";
             }
+            if(done) break;
+              delay(1);
           }
-          if(done) break;
-            delay(1);
+          cl.stop();
+        } catch (const bool) {
+          cl.stop();
         }
-        cl.stop();
       }
     }
     checkStatusNotification();
@@ -1020,20 +1030,36 @@ void wifiConnectionHandler( void * pvParameters ){
     while (WiFi.status() == WL_CONNECTED) {
         delay(5000);
     }
+    wifiConnected = false;
     Serial.println("WiFi disconnected, reconnecting...");
-    WiFi.reconnect();
-    while (WiFi.status() != WL_CONNECTED) {
-        delay(1000);
+    WiFi.disconnect();
+
+    while(WiFi.status() != WL_CONNECTED) {
+      unsigned long begin_ms = millis();
+      WiFi.reconnect();
+      while (WiFi.status() != WL_CONNECTED) {
+          delay(1000);
+          if(millis() - begin_ms > 10000) break;
+      }
+      if(WiFi.status() == WL_CONNECTED) break;
+      WiFi.disconnect();
+      delay(30*1000);
     }    
     Serial.println("WiFi reconnected...");
     Serial.print("Local IP: ");
     Serial.println(WiFi.localIP());
+    wifiConnected = true;
   }
 }
 
 void statusLEDBlinker( void * pvParameters ){
   while(true) {
-    if(!currentState.m_linkUp) {
+    if(!wifiConnected) {
+        digitalWrite(LED,HIGH);
+        delay(100);
+        digitalWrite(LED,LOW);
+        delay(500);
+    } else if(!currentState.m_linkUp) {
       digitalWrite(LED,HIGH);
       delay(100);
       digitalWrite(LED,LOW);
@@ -1137,6 +1163,7 @@ void setup() {
         delay(100);
         digitalWrite(LED,LOW);
         delay(500);
+        wifiConnected = true;
     }
     Serial.print("Local IP: ");
     Serial.println(WiFi.localIP());
