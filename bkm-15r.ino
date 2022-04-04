@@ -19,13 +19,20 @@
  * Some modules seemingly runs on 3.3V directly, and thus doesn't have a regulator
  * like mine does. In that case, you should of course run 3.3V to VCC of the module
  * instead.
+ * 
+ * The code now supports 17 physical keys, the 12 key input board, 4 key menu navigation and power.
+ * This should cover all functionality. Physical keys and webinterface work at the same time.
+ * 
+ * If you prefer no wifi/webinterface and only physical keys, set DISABLE_WIFI (GPIO17) low.
+ * 
+ * A PCB and 3D printable case that supports all this in a small package is coming...
  *
  * The "Preferences" library is used to store the network credentials, so on initial
  * boot, if nothing is in, it starts up making a SoftAP called "BKM-15R-Setup" with
  * "adminadmin" as the PSK. Connecting to that and browsing to 192.168.4.1 should
  * give a *very* basic setup page where SSID and PSK can be entered. Note there is zero
  * SSL and whatnot, assume your WiFi is now compromised and will never work again.
- * If you need to redo this, power up with GPIO27 pulled to GND, and it will return
+ * If you need to redo this, power up with FORCE_SETUP (GPIO3) pulled to GND, and it will return
  * to setup mode.
  * 
  * Use a crossed network cable between monitor and ENC28J60 or a switch inbetween.
@@ -38,26 +45,93 @@
  * 3 Short - Waiting for connection to monitor 
  * Blinking 50/50 - Communication is up
  * 
+ * 04/04/2022 - Version 0.3 - Add physical keys support, wifi kill switch
  * 08/02/2022 - Version 0.2
  * 06/02/2022 - Initial version 0.1
  */
 
 #define VERSION_MAJOR       (0)
-#define VERSION_MINOR       (2)
+#define VERSION_MINOR       (3)
 
 #include <SPI.h>
 #include <EthernetENC.h>
 #include <WiFi.h>
 #include <Preferences.h>
 
-#define LED                 (2)   // Status LED
-#define FORCE_SETUP         (27)  // If low during boot, will make the board enter setup mode
+#define FORCE_SETUP         (3)  // If low during boot, will make the board enter setup mode
+#define LED                 (2)  // Status LED
+#define DISABLE_WIFI        (17) // Disable WiFi
+
+#define PROTO (0) // This is for my proto board, leave it off...
+
+#ifndef PROTO
+#define INPUT_KEY_0         (34)
+#define INPUT_KEY_1         (13)
+#define INPUT_KEY_2         (12)
+#define INPUT_KEY_3         (14)
+#define INPUT_KEY_4         (27)
+#define INPUT_KEY_5         (26)
+#define INPUT_KEY_6         (25)
+#define INPUT_KEY_7         (33)
+#define INPUT_KEY_8         (32)
+#define INPUT_KEY_9         (35)
+#define INPUT_KEY_ENT       (39)
+#define INPUT_KEY_DEL       (36)
+#else
+#define INPUT_KEY_0         (34)
+#define INPUT_KEY_1         (14)
+#define INPUT_KEY_2         (12)
+#define INPUT_KEY_3         (13)
+#define INPUT_KEY_4         (25)
+#define INPUT_KEY_5         (26)
+#define INPUT_KEY_6         (27)
+#define INPUT_KEY_7         (35)
+#define INPUT_KEY_8         (32)
+#define INPUT_KEY_9         (33)
+#define INPUT_KEY_ENT       (36)
+#define INPUT_KEY_DEL       (39)
+#endif // PROTO
+
+#define NAV_KEY_UP          (4)
+#define NAV_KEY_DOWN        (22)
+#define NAV_KEY_MENU        (15)
+#define NAV_KEY_ENTER       (21)
+
+#define KEY_POWER           (16)
+#define NUM_PHYSKEYS        (17)
+
+uint32_t physicalKeys[NUM_PHYSKEYS][2] = {
+  { INPUT_KEY_0,    0x00000001 },
+  { INPUT_KEY_1,    0x00000002 },
+  { INPUT_KEY_2,    0x00000004 },
+  { INPUT_KEY_3,    0x00000008 },
+  { INPUT_KEY_4,    0x00000010 },
+  { INPUT_KEY_5,    0x00000020 },
+  { INPUT_KEY_6,    0x00000040 },
+  { INPUT_KEY_7,    0x00000080 },
+  { INPUT_KEY_8,    0x00000100 },
+  { INPUT_KEY_9,    0x00000200 },
+  { INPUT_KEY_DEL,  0x00000400 },
+  { INPUT_KEY_ENT,  0x00000800 },
+  { KEY_POWER,      0x00001000 },
+  { NAV_KEY_UP,     0x00002000 },
+  { NAV_KEY_DOWN,   0x00004000 },
+  { NAV_KEY_MENU,   0x00008000 },
+  { NAV_KEY_ENTER,  0x00010000 }
+};
+
+uint32_t physicalKeyState_prev  = 0xFFFFFFFF;
+uint32_t physicalKeyState       = 0;
 
 #define RECV_TIMEOUT        (1000)
 
 // Keys for Preferences, do NOT edit these to actually be your SSID and password
 #define KEY_SSID      "ssid"
 #define KEY_PASSWORD  "password"
+
+// These are the strings being used internally. Leave blank.
+String ssid = "";
+String password = "";
 
 // status word 1
 #define POWER_ON_STATUS     (0x8000)
@@ -145,6 +219,8 @@ byte mac[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED };
 
 bool settingUp = false;
 
+bool wifiEnabled = true;
+
 const char contentlengthstr[] = "Content-Length: ";
 
 Preferences preferences;
@@ -171,6 +247,7 @@ bool wifiConnected = false;
 
 TaskHandle_t webServerTask;
 TaskHandle_t wifiConnectionTask;
+TaskHandle_t buttonTask;
 TaskHandle_t ledTask;
 
 SemaphoreHandle_t state_sem;
@@ -966,6 +1043,7 @@ void checkStatusNotification(){
 }
 
 void webserverHandler( void * pvParameters ) {
+
   int contentLength = 0;
   while(true) {
     if(webServer.hasClient()) {
@@ -1053,6 +1131,108 @@ void wifiConnectionHandler( void * pvParameters ){
   }
 }
 
+void buttonHandler(void * pvParameters) {
+  bool ignore = false;
+  while(1) {
+    auto pushButton = [&](const int buttonPushed) {
+      xSemaphoreTake(state_sem, portMAX_DELAY);
+      if(commandQueue.getCount() < MAX_QUEUELEN) {
+        Command_t cmd;
+        switch(buttonPushed) {
+          case KEY_POWER:
+            cmd.m_commandType = CT_STATUS;
+            strcpy(cmd.m_command,POWER_BUTTON);
+          break;
+
+          case INPUT_KEY_0:
+            cmd.m_commandType = CT_INFO;
+            strcpy(cmd.m_command,"0");
+          break;
+          case INPUT_KEY_1:
+            cmd.m_commandType = CT_INFO;
+            strcpy(cmd.m_command,"1");
+          break;
+          case INPUT_KEY_2:
+            cmd.m_commandType = CT_INFO;
+            strcpy(cmd.m_command,"2");
+          break;
+          case INPUT_KEY_3:
+            cmd.m_commandType = CT_INFO;
+            strcpy(cmd.m_command,"3");
+          break;
+          case INPUT_KEY_4:
+            cmd.m_commandType = CT_INFO;
+            strcpy(cmd.m_command,"4");
+          break;
+          case INPUT_KEY_5:
+            cmd.m_commandType = CT_INFO;
+            strcpy(cmd.m_command,"5");
+          break;
+          case INPUT_KEY_6:
+            cmd.m_commandType = CT_INFO;
+            strcpy(cmd.m_command,"6");
+          break;
+          case INPUT_KEY_7:
+            cmd.m_commandType = CT_INFO;
+            strcpy(cmd.m_command,"7");
+          break;
+          case INPUT_KEY_8:
+            cmd.m_commandType = CT_INFO;
+            strcpy(cmd.m_command,"8");
+          break;
+          case INPUT_KEY_9:
+            cmd.m_commandType = CT_INFO;
+            strcpy(cmd.m_command,"9");
+          break;
+          case INPUT_KEY_ENT:
+            cmd.m_commandType = CT_INFO;
+            strcpy(cmd.m_command,INFO_INP_ENTER);
+          break;
+          case INPUT_KEY_DEL:
+            cmd.m_commandType = CT_INFO;
+            strcpy(cmd.m_command,INFO_INP_DELETE);
+          break;
+
+          case NAV_KEY_MENU:
+            cmd.m_commandType = CT_INFO;
+            strcpy(cmd.m_command,INFO_NAV_MENU);
+          break;
+          case NAV_KEY_ENTER:
+            cmd.m_commandType = CT_INFO;
+            strcpy(cmd.m_command,INFO_NAV_MENUENT);
+          break;
+          case NAV_KEY_UP:
+            cmd.m_commandType = CT_INFO;
+            strcpy(cmd.m_command,INFO_NAV_MENUUP);
+          break;
+          case NAV_KEY_DOWN:
+            cmd.m_commandType = CT_INFO;
+            strcpy(cmd.m_command,INFO_NAV_MENUDOWN);
+          break;
+          default:
+            ignore = true;
+          break;
+        }
+        if(!ignore) commandQueue.push(&cmd);
+        ignore = false;
+      }
+      xSemaphoreGive(state_sem);
+    };
+    for(size_t i = 0; i < NUM_PHYSKEYS; ++i){
+      if(digitalRead(physicalKeys[i][0]) == HIGH) {
+        physicalKeyState |= physicalKeys[i][1];
+      } else {
+        physicalKeyState &= ~physicalKeys[i][1];        
+      }
+      if((physicalKeyState & physicalKeys[i][1]) &&
+        ! (physicalKeyState_prev & physicalKeys[i][1]))
+          pushButton(physicalKeys[i][0]);
+    }
+    physicalKeyState_prev = physicalKeyState;
+    delay(100);
+  }
+}
+
 void statusLEDBlinker( void * pvParameters ){
   while(true) {
     if(!wifiConnected) {
@@ -1091,11 +1271,16 @@ void statusLEDBlinker( void * pvParameters ){
     }
   }
 }
- 
+
 void setup() {
   pinMode(LED,OUTPUT);
-  pinMode(FORCE_SETUP,INPUT_PULLUP);
- 
+
+  for(size_t i = 0; i < NUM_PHYSKEYS; ++i){
+    pinMode(physicalKeys[i][0],INPUT_PULLUP);
+  }
+
+  pinMode(DISABLE_WIFI,INPUT_PULLUP);
+
   Serial.begin(115200);
 
   Serial.println("\n\nBKM-15Rduino"); // name shamelessly inspired by Aaron Bonhams BKM-10Rduino, sry!
@@ -1106,26 +1291,30 @@ void setup() {
   Serial.println("(2022) Martin Hejnfelt (martin@hejnfelt.com)");
   Serial.println("www.immerhax.com\n\n");
 
-  String ssid = "";
-  String password = "";
-
-  if(digitalRead(FORCE_SETUP) == LOW) {
-    Serial.println("Forcing setup");
-    settingUp = true;
-  } else {
-    preferences.begin("credentials",true);
-    if(!preferences.isKey(KEY_SSID)) {
-      Serial.println("No credentials exist");
-      settingUp = true;
-    } else {
-      ssid = preferences.getString(KEY_SSID,"");
-      if(ssid == "") settingUp = true;
-      password = preferences.getString(KEY_PASSWORD,"");
-    }
-    preferences.end();
+  if(digitalRead(DISABLE_WIFI) == LOW) {
+    wifiEnabled = false;  
+    Serial.println("WiFi is disabled...");
   }
 
-  if(settingUp) {
+  if(wifiEnabled) {
+    if(digitalRead(FORCE_SETUP) == LOW) {
+      Serial.println("Forcing setup");
+      settingUp = true;
+    } else {
+      preferences.begin("credentials",true);
+      if(!preferences.isKey(KEY_SSID)) {
+        Serial.println("No credentials exist");
+        settingUp = true;
+      } else {
+        ssid = preferences.getString(KEY_SSID,"");
+        if(ssid == "") settingUp = true;
+        password = preferences.getString(KEY_PASSWORD,"");
+      }
+      preferences.end();
+    }
+  }
+
+  if(settingUp && wifiEnabled) {
     Serial.println("Starting Setup Access Point:");
     Serial.print("Config: ");    
     Serial.println(WiFi.softAPConfig(ap_ip, ap_gw, ap_subnet) ? "OK" : "Failed!");
@@ -1138,7 +1327,7 @@ void setup() {
     
     webServer.begin();
   } else {
-    Serial.println("Initializing ethernet");
+    Serial.print("Initializing ethernet...");
     Ethernet.init(5);
     Ethernet.begin(mac, ip);
     
@@ -1148,38 +1337,43 @@ void setup() {
         delay(100);
       }
     }
+    Serial.println("OK");
     
     state_sem = xSemaphoreCreateMutex();
-    
-    WiFi.setHostname("BKM-15R");
-
-    WiFi.begin(ssid.c_str(), password.c_str());
-    
-    Serial.print("Connecting to SSID '");
-    Serial.print(ssid);
-    Serial.println("'");
-
-    while (WiFi.status() != WL_CONNECTED) {
-        digitalWrite(LED,HIGH);
-        delay(100);
-        digitalWrite(LED,LOW);
-        delay(500);
-        wifiConnected = true;
-    }
-    Serial.print("Local IP: ");
-    Serial.println(WiFi.localIP());
 
     memcpy(packetBuf,header,sizeof(header));
     
     currentState.m_linkUp = (Ethernet.linkStatus() == LinkON);
-    
-    Serial.println("Starting WebServer");
-    webServer.begin();    
 
     //create a task to run the webserver stuff on core 0, as core 1 is default
-    xTaskCreatePinnedToCore(webserverHandler, "Webserver", 40000, NULL, 1, &webServerTask, 0);
-    xTaskCreatePinnedToCore(statusLEDBlinker, "LED Blinker", 1000, NULL, 2, &ledTask, 0);
-    xTaskCreatePinnedToCore(wifiConnectionHandler, "Wifi Connection", 1000, NULL, 3, &wifiConnectionTask, 0);
+    if(wifiEnabled) {
+      WiFi.setHostname("BKM-15R");
+      
+      WiFi.begin(ssid.c_str(), password.c_str());
+      
+      Serial.print("Connecting to SSID '");
+      Serial.print(ssid);
+      Serial.println("'...");
+      
+      while (WiFi.status() != WL_CONNECTED) {
+          digitalWrite(LED,HIGH);
+          delay(100);
+          digitalWrite(LED,LOW);
+          delay(500);
+          wifiConnected = true;
+      }
+
+      Serial.print("Local IP: ");
+      Serial.println(WiFi.localIP());
+      
+      Serial.println("Starting WebServer");
+      webServer.begin();    
+
+      xTaskCreatePinnedToCore(webserverHandler, "Webserver", 40000, NULL, 1, &webServerTask, 0);
+      xTaskCreatePinnedToCore(wifiConnectionHandler, "Wifi Connection", 1000, NULL, 3, &wifiConnectionTask, 0);
+    }
+    xTaskCreatePinnedToCore(buttonHandler, "Button handler", 1000, NULL, 2, &buttonTask, 0);
+    xTaskCreatePinnedToCore(statusLEDBlinker, "LED Blinker", 1000, NULL, 3, &ledTask, 0);
   }
 }
 
