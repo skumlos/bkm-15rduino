@@ -25,7 +25,9 @@
  * 
  * If you prefer no wifi/webinterface and only physical keys, set DISABLE_WIFI (GPIO17) low.
  * 
- * A PCB and 3D printable case that supports all this in a small package is coming...
+ * A PCB and 3D printable case that supports all this in a small package can be found here:
+ * https://github.com/skumlos/bkm-15r-mini (Kicad project)
+ * https://www.thingiverse.com/thing:5344611 (Freecad project and STLs)
  *
  * The "Preferences" library is used to store the network credentials, so on initial
  * boot, if nothing is in, it starts up making a SoftAP called "BKM-15R-Setup" with
@@ -45,13 +47,14 @@
  * 3 Short - Waiting for connection to monitor 
  * Blinking 50/50 - Communication is up
  * 
+ * 25/04/2022 - Version 0.4 - Ensure physical keys always work irregardless of wifi state
  * 04/04/2022 - Version 0.3 - Add physical keys support, wifi kill switch
  * 08/02/2022 - Version 0.2
  * 06/02/2022 - Initial version 0.1
  */
 
 #define VERSION_MAJOR       (0)
-#define VERSION_MINOR       (3)
+#define VERSION_MINOR       (4)
 
 #include <SPI.h>
 #include <EthernetENC.h>
@@ -1235,39 +1238,175 @@ void buttonHandler(void * pvParameters) {
 
 void statusLEDBlinker( void * pvParameters ){
   while(true) {
-    if(!wifiConnected) {
+    if(settingUp) {
+      digitalWrite(LED,HIGH);
+      delay(5000);
+    } else {
+      if(!wifiConnected) {
+          digitalWrite(LED,HIGH);
+          delay(100);
+          digitalWrite(LED,LOW);
+          delay(500);
+      } else if(!currentState.m_linkUp) {
         digitalWrite(LED,HIGH);
         delay(100);
         digitalWrite(LED,LOW);
-        delay(500);
-    } else if(!currentState.m_linkUp) {
-      digitalWrite(LED,HIGH);
-      delay(100);
-      digitalWrite(LED,LOW);
-      delay(100);
-      digitalWrite(LED,HIGH);
-      delay(100);
-      digitalWrite(LED,LOW);
-      delay(1000);
-    } else if(!currentState.m_connected) {
-      digitalWrite(LED,HIGH);
-      delay(100);
-      digitalWrite(LED,LOW);             
-      delay(100);
-      digitalWrite(LED,HIGH);
-      delay(100);
-      digitalWrite(LED,LOW);
-      delay(100);
-      digitalWrite(LED,HIGH);
-      delay(100);
-      digitalWrite(LED,LOW);
-      delay(1000);
+        delay(100);
+        digitalWrite(LED,HIGH);
+        delay(100);
+        digitalWrite(LED,LOW);
+        delay(1000);
+      } else if(!currentState.m_connected) {
+        digitalWrite(LED,HIGH);
+        delay(100);
+        digitalWrite(LED,LOW);             
+        delay(100);
+        digitalWrite(LED,HIGH);
+        delay(100);
+        digitalWrite(LED,LOW);
+        delay(100);
+        digitalWrite(LED,HIGH);
+        delay(100);
+        digitalWrite(LED,LOW);
+        delay(1000);
+      } else {
+        digitalWrite(LED,HIGH);
+        delay(200);
+        digitalWrite(LED,LOW);      
+        delay(200);
+        digitalWrite(LED,LOW);      
+      }
+    }
+  }
+}
+
+void setupWifi( void * pvParameters ){
+  webServer.begin();
+  while(true) {
+    WiFiClient setupClient = webServer.available();
+    if (setupClient) {
+      // a http request ends with a blank line
+      String str;
+      int contentLength = 0;
+      WebRequest_t req;
+      bool done = false;
+      Serial.println("Setup client connected\n");
+      while (setupClient.connected()) {
+        while (setupClient.available()) {
+          char c = setupClient.read();
+          str += c;
+          if(c == '\n') {
+            if(str == "\r\n") {
+              if(contentLength != 0) {
+                int bytesRead = 0;
+                while (setupClient.available() < contentLength) delay(1);
+                while(bytesRead < contentLength) {
+                  c = setupClient.read();
+                  req.m_content += c;
+                  ++bytesRead;
+                }
+              }
+              if(req.m_URL == "/") {
+                String content;
+                content += "<!DOCTYPE HTML>\n";
+                content += "<html>\n";
+                content += "<head>\n";
+                content += "<title>BKM-15R Setup</title>\n";
+                content += "<script>\n";
+                content += \
+                  "function sendSetup() {\n" \
+                  "  let msg = '';\n" \
+                  "  let ssidelem = document.getElementById('wifissid');\n" \
+                  "  msg = 'ssid='+ssidelem.value+'\\r\\n'\n" \
+                  "  let pskelem = document.getElementById('wifipsk');\n" \
+                  "  msg += 'psk='+pskelem.value+'\\r\\n'\n" \
+                  "  var xhttp = new XMLHttpRequest();\n" \
+                  "  xhttp.onreadystatechange = function() {\n" \
+                  "    if (this.readyState == 4) {\n" \
+                  "      if(this.status == 200) { \n" \
+                  "        alert('OK');\n" \
+                  "      } else if (this.status == 400) {\n" \
+                  "        alert('Not accepted, try again...');\n" \
+                  "      }\n" \
+                  "    }\n" \
+                  "  };\n" \
+                  "  xhttp.open('POST', '";
+                content += "/setup";
+                content += "', true);\n" \
+                  "  xhttp.setRequestHeader('Content-type', 'application/json');\n" \
+                  "  xhttp.send(msg);\n" \
+                  "};\n";
+                content += "</script>\n";
+                content += "<body>\n";
+                content += "BKM-15R remote setup<br>\n";
+                content += "<span>SSID:</span><input id='wifissid'><br>\n";
+                content += "<span>PSK:</span><input id='wifipsk' type='password'><br>\n";
+                content += "<button onclick='sendSetup()'>Send</button><br>\n";
+                content += "<p>Pressing 'Send' will save credentials, and restart...</p>\n";
+                content += "</body>\n";
+                content += "</html>\n";
+                // send a standard http response header
+                setupClient.println("HTTP/1.1 200 OK");
+                setupClient.println("Content-Type: text/html");
+                setupClient.print(contentlengthstr);
+                setupClient.println(content.length());
+                setupClient.println("Connection: close");
+                setupClient.println();
+                setupClient.println(content);
+              } else if (req.m_URL == "/setup") {
+                int b = req.m_content.indexOf('=');
+                int p = req.m_content.indexOf("\r\n",b+1);
+                String ssid = req.m_content.substring(b+1,p); 
+                b = req.m_content.indexOf('=',p+1);
+                p = req.m_content.indexOf("\r\n",b+1);
+                String psk = req.m_content.substring(b+1,p); 
+                if(ssid != "") {
+                  setupClient.println("HTTP/1.1 200 OK");
+                  setupClient.println("Content-Type: none");
+                  setupClient.println("Connection: close");
+                  preferences.begin("credentials",false);
+                  preferences.putString(KEY_SSID,ssid);
+                  preferences.putString(KEY_PASSWORD,psk);
+                  preferences.end();                
+                  delay(1000);
+                  ESP.restart();
+                } else {
+                  setupClient.println("HTTP/1.1 400 Bad Request");
+                  setupClient.println("Content-Type: none");
+                  setupClient.println("Connection: close");                
+                }
+              } else {
+                setupClient.println("HTTP/1.1 404 Not Found");
+                setupClient.println("Connection: close");   
+              }
+              done = true;
+              break;
+            } else {
+              if(str.startsWith(contentlengthstr)) {
+                req.m_content = "";
+                String cl = str.substring(strlen(contentlengthstr),str.indexOf('\r'));
+                contentLength = cl.toInt();
+              }
+              if(str.startsWith("GET")) {
+                str = str.substring(4,str.indexOf(' ',4));
+                req.m_URL = str;
+              }
+              if(str.startsWith("POST")) {
+                str = str.substring(5,str.indexOf(' ',5));
+                req.m_URL = str;
+              }
+            }
+            str = "";
+          }
+        }
+        if(done) break;
+        delay(1);
+      }
+      Serial.println("Disconnecting setup client");
+      setupClient.flush();
+      setupClient.stop();
     } else {
-      digitalWrite(LED,HIGH);
-      delay(200);
-      digitalWrite(LED,LOW);      
-      delay(200);
-      digitalWrite(LED,LOW);      
+      delay(100);
     }
   }
 }
@@ -1280,6 +1419,15 @@ void setup() {
   }
 
   pinMode(DISABLE_WIFI,INPUT_PULLUP);
+  pinMode(FORCE_SETUP,INPUT_PULLUP);
+
+  if(digitalRead(DISABLE_WIFI) == LOW) {
+    wifiEnabled = false;  
+  }
+
+  if(digitalRead(FORCE_SETUP) == LOW) {
+    settingUp = true;
+  }
 
   Serial.begin(115200);
 
@@ -1290,16 +1438,10 @@ void setup() {
   Serial.println(VERSION_MINOR);
   Serial.println("(2022) Martin Hejnfelt (martin@hejnfelt.com)");
   Serial.println("www.immerhax.com\n\n");
-
-  if(digitalRead(DISABLE_WIFI) == LOW) {
-    wifiEnabled = false;  
-    Serial.println("WiFi is disabled...");
-  }
-
+  
   if(wifiEnabled) {
-    if(digitalRead(FORCE_SETUP) == LOW) {
+    if(settingUp) {
       Serial.println("Forcing setup");
-      settingUp = true;
     } else {
       preferences.begin("credentials",true);
       if(!preferences.isKey(KEY_SSID)) {
@@ -1314,39 +1456,27 @@ void setup() {
     }
   }
 
-  if(settingUp && wifiEnabled) {
-    Serial.println("Starting Setup Access Point:");
-    Serial.print("Config: ");    
-    Serial.println(WiFi.softAPConfig(ap_ip, ap_gw, ap_subnet) ? "OK" : "Failed!");
-    Serial.print("Startup: ");    
-    Serial.println(WiFi.softAP("BKM-15R-Setup", "adminadmin", 6, false) ? "OK" : "Failed!");
-    Serial.print("AP IP address: ");
-    Serial.println(WiFi.softAPIP());
-    Serial.print("MAC: ");
-    Serial.println(WiFi.softAPmacAddress());
-    
-    webServer.begin();
-  } else {
-    Serial.print("Initializing ethernet...");
-    Ethernet.init(5);
-    Ethernet.begin(mac, ip);
-    
-    if (Ethernet.hardwareStatus() == EthernetNoHardware) {
-      while (true) {
-        digitalWrite(LED,HIGH);
-        delay(100);
-      }
+  Serial.print("Initializing ethernet...");
+  Ethernet.init(5);
+  Ethernet.begin(mac, ip);
+  
+  if (Ethernet.hardwareStatus() == EthernetNoHardware) {
+    while (true) {
+      digitalWrite(LED,HIGH);
+      delay(100);
     }
-    Serial.println("OK");
-    
-    state_sem = xSemaphoreCreateMutex();
+  }
+  Serial.println("OK");
+  
+  state_sem = xSemaphoreCreateMutex();
 
-    memcpy(packetBuf,header,sizeof(header));
-    
-    currentState.m_linkUp = (Ethernet.linkStatus() == LinkON);
+  memcpy(packetBuf,header,sizeof(header));
+  
+  currentState.m_linkUp = (Ethernet.linkStatus() == LinkON);
 
-    //create a task to run the webserver stuff on core 0, as core 1 is default
-    if(wifiEnabled) {
+  if(wifiEnabled) {
+    if(!settingUp) {
+      //create a task to run the webserver stuff on core 0, as core 1 is default
       WiFi.setHostname("BKM-15R");
       
       WiFi.begin(ssid.c_str(), password.c_str());
@@ -1362,19 +1492,32 @@ void setup() {
           delay(500);
           wifiConnected = true;
       }
-
+  
       Serial.print("Local IP: ");
       Serial.println(WiFi.localIP());
       
       Serial.println("Starting WebServer");
       webServer.begin();    
-
+  
       xTaskCreatePinnedToCore(webserverHandler, "Webserver", 40000, NULL, 1, &webServerTask, 0);
       xTaskCreatePinnedToCore(wifiConnectionHandler, "Wifi Connection", 1000, NULL, 3, &wifiConnectionTask, 0);
+    } else {
+      Serial.println("Starting Setup Access Point:");
+      Serial.print("Config: ");    
+      Serial.println(WiFi.softAPConfig(ap_ip, ap_gw, ap_subnet) ? "OK" : "Failed!");
+      Serial.print("Startup: ");    
+      Serial.println(WiFi.softAP("BKM-15R-Setup", "adminadmin", 6, false) ? "OK" : "Failed!");
+      Serial.print("AP IP address: ");
+      Serial.println(WiFi.softAPIP());
+      Serial.print("MAC: ");
+      Serial.println(WiFi.softAPmacAddress());
+      xTaskCreatePinnedToCore(setupWifi, "setupWebserver", 40000, NULL, 1, &webServerTask, 0);      
     }
-    xTaskCreatePinnedToCore(buttonHandler, "Button handler", 1000, NULL, 2, &buttonTask, 0);
-    xTaskCreatePinnedToCore(statusLEDBlinker, "LED Blinker", 1000, NULL, 3, &ledTask, 0);
+  } else {
+        Serial.println("WiFi is disabled...");
   }
+  xTaskCreatePinnedToCore(buttonHandler, "Button handler", 1000, NULL, 2, &buttonTask, 0);
+  xTaskCreatePinnedToCore(statusLEDBlinker, "LED Blinker", 1000, NULL, 3, &ledTask, 0);
 }
 
 void updateStatus() {
@@ -1536,167 +1679,37 @@ void addWifiNetworks() {
   }
 }
 
-void setupSystem() {
-  WiFiClient setupClient = webServer.available();
-  if (setupClient) {
-    // a http request ends with a blank line
-    String str;
-    int contentLength = 0;
-    WebRequest_t req;
-    bool done = false;
-    Serial.println("Setup client connected\n");
-    while (setupClient.connected()) {
-      while (setupClient.available()) {
-        char c = setupClient.read();
-        str += c;
-        if(c == '\n') {
-          if(str == "\r\n") {
-            if(contentLength != 0) {
-              int bytesRead = 0;
-              while (setupClient.available() < contentLength) delay(1);
-              while(bytesRead < contentLength) {
-                c = setupClient.read();
-                req.m_content += c;
-                ++bytesRead;
-              }
-            }
-            if(req.m_URL == "/") {
-              String content;
-              content += "<!DOCTYPE HTML>\n";
-              content += "<html>\n";
-              content += "<head>\n";
-              content += "<title>BKM-15R Setup</title>\n";
-              content += "<script>\n";
-              content += \
-                "function sendSetup() {\n" \
-                "  let msg = '';\n" \
-                "  let ssidelem = document.getElementById('wifissid');\n" \
-                "  msg = 'ssid='+ssidelem.value+'\\r\\n'\n" \
-                "  let pskelem = document.getElementById('wifipsk');\n" \
-                "  msg += 'psk='+pskelem.value+'\\r\\n'\n" \
-                "  var xhttp = new XMLHttpRequest();\n" \
-                "  xhttp.onreadystatechange = function() {\n" \
-                "    if (this.readyState == 4) {\n" \
-                "      if(this.status == 200) { \n" \
-                "        alert('OK');\n" \
-                "      } else if (this.status == 400) {\n" \
-                "        alert('Not accepted, try again...');\n" \
-                "      }\n" \
-                "    }\n" \
-                "  };\n" \
-                "  xhttp.open('POST', '";
-              content += "/setup";
-              content += "', true);\n" \
-                "  xhttp.setRequestHeader('Content-type', 'application/json');\n" \
-                "  xhttp.send(msg);\n" \
-                "};\n";
-              content += "</script>\n";
-              content += "<body>\n";
-              content += "BKM-15R remote setup<br>\n";
-              content += "<span>SSID:</span><input id='wifissid'><br>\n";
-              content += "<span>PSK:</span><input id='wifipsk' type='password'><br>\n";
-              content += "<button onclick='sendSetup()'>Send</button><br>\n";
-              content += "<p>Pressing 'Send' will save credentials, and restart...</p>\n";
-              content += "</body>\n";
-              content += "</html>\n";
-              // send a standard http response header
-              setupClient.println("HTTP/1.1 200 OK");
-              setupClient.println("Content-Type: text/html");
-              setupClient.print(contentlengthstr);
-              setupClient.println(content.length());
-              setupClient.println("Connection: close");
-              setupClient.println();
-              setupClient.println(content);
-            } else if (req.m_URL == "/setup") {
-              int b = req.m_content.indexOf('=');
-              int p = req.m_content.indexOf("\r\n",b+1);
-              String ssid = req.m_content.substring(b+1,p); 
-              b = req.m_content.indexOf('=',p+1);
-              p = req.m_content.indexOf("\r\n",b+1);
-              String psk = req.m_content.substring(b+1,p); 
-              if(ssid != "") {
-                setupClient.println("HTTP/1.1 200 OK");
-                setupClient.println("Content-Type: none");
-                setupClient.println("Connection: close");
-                preferences.begin("credentials",false);
-                preferences.putString(KEY_SSID,ssid);
-                preferences.putString(KEY_PASSWORD,psk);
-                preferences.end();                
-                delay(1000);
-                ESP.restart();
-              } else {
-                setupClient.println("HTTP/1.1 400 Bad Request");
-                setupClient.println("Content-Type: none");
-                setupClient.println("Connection: close");                
-              }
-            } else {
-              setupClient.println("HTTP/1.1 404 Not Found");
-              setupClient.println("Connection: close");   
-            }
-            done = true;
-            break;
-          } else {
-            if(str.startsWith(contentlengthstr)) {
-              req.m_content = "";
-              String cl = str.substring(strlen(contentlengthstr),str.indexOf('\r'));
-              contentLength = cl.toInt();
-            }
-            if(str.startsWith("GET")) {
-              str = str.substring(4,str.indexOf(' ',4));
-              req.m_URL = str;
-            }
-            if(str.startsWith("POST")) {
-              str = str.substring(5,str.indexOf(' ',5));
-              req.m_URL = str;
-            }
-          }
-          str = "";
-        }
-      }
-      if(done) break;
-      delay(1);
-    }
-    Serial.println("Disconnecting setup client");
-    setupClient.flush();
-    setupClient.stop();
-  }
-}
-
 void loop() {
-  if(!settingUp) {
-    if(Ethernet.linkStatus() == LinkOFF) waitLink();
+  if(Ethernet.linkStatus() == LinkOFF) waitLink();
+  
+  if(!monitorClient.connected()) {
+    connectMonitor();
+  } else {
+    Command_t c;
+    Command_t* cmd = NULL;
     
-    if(!monitorClient.connected()) {
-      connectMonitor();
-    } else {
-      Command_t c;
-      Command_t* cmd = NULL;
-      
-      xSemaphoreTake(state_sem, portMAX_DELAY);
-      cmd = commandQueue.pop(&c);
-      xSemaphoreGive(state_sem);        
-    
-      if(NULL != cmd) {
-        switch(cmd->m_commandType) {
-          case CT_INFO:
-            sendInfoButtonPacket(cmd->m_command);
-          break;
-          case CT_STATUS:
-            sendStatusButtonTogglePacket(cmd->m_command);
-          break;
-          case CT_INFOKNOB:
-            sendInfoKnobPacket(cmd->m_command);
-          break;
-        }
-      }
-    
-      if(millis() - lastStatusUpdate_ms >= 150) {
-        updateStatus();
-        lastStatusUpdate_ms = millis();
+    xSemaphoreTake(state_sem, portMAX_DELAY);
+    cmd = commandQueue.pop(&c);
+    xSemaphoreGive(state_sem);        
+  
+    if(NULL != cmd) {
+      switch(cmd->m_commandType) {
+        case CT_INFO:
+          sendInfoButtonPacket(cmd->m_command);
+        break;
+        case CT_STATUS:
+          sendStatusButtonTogglePacket(cmd->m_command);
+        break;
+        case CT_INFOKNOB:
+          sendInfoKnobPacket(cmd->m_command);
+        break;
       }
     }
-    delay(10);
-  } else {
-    setupSystem();
+  
+    if(millis() - lastStatusUpdate_ms >= 150) {
+      updateStatus();
+      lastStatusUpdate_ms = millis();
+    }
   }
+  delay(10);
 }
