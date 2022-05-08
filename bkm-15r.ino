@@ -47,6 +47,8 @@
  * 3 Short - Waiting for connection to monitor 
  * Blinking 50/50 - Communication is up
  * 
+ * 08/05/2022 - Version 0.5 - Added some sleeps and stuff which are apparently needed for reliable AP on some ESP32 versions
+ *                            Also added button to clear credentials in setup.
  * 25/04/2022 - Version 0.4 - Ensure physical keys always work irregardless of wifi state
  * 04/04/2022 - Version 0.3 - Add physical keys support, wifi kill switch
  * 08/02/2022 - Version 0.2
@@ -54,7 +56,7 @@
  */
 
 #define VERSION_MAJOR       (0)
-#define VERSION_MINOR       (4)
+#define VERSION_MINOR       (5)
 
 #include <SPI.h>
 #include <EthernetENC.h>
@@ -223,8 +225,8 @@ const uint8_t get_status[31] =  { 0x03, 0x0b, 0x53, 0x4f, 0x4e, 0x59, 0x00, 0x00
 uint8_t status_response[53];
 
 IPAddress ap_ip(192,168,4,1);
-IPAddress ap_gw(192,168,4,1);
 IPAddress ap_subnet(255,255,255,0);
+IPAddress ap_gw(192,168,4,1);
 
 unsigned long lastStatusUpdate_ms = 0;
 
@@ -1319,6 +1321,23 @@ void setupWifi( void * pvParameters ){
                   "  xhttp.setRequestHeader('Content-type', 'application/json');\n" \
                   "  xhttp.send(msg);\n" \
                   "};\n";
+                content += \
+                  "function clearSetup() {\n" \
+                  "  let msg = '{}';\n" \
+                  "  var xhttp = new XMLHttpRequest();\n" \
+                  "  xhttp.onreadystatechange = function() {\n" \
+                  "    if (this.readyState == 4) {\n" \
+                  "      if(this.status == 200) { \n" \
+                  "        alert('Cleared');\n" \
+                  "      }\n" \
+                  "    }\n" \
+                  "  };\n" \
+                  "  xhttp.open('POST', '";
+                content += "/clearcreds";
+                content += "', true);\n" \
+                  "  xhttp.setRequestHeader('Content-type', 'application/json');\n" \
+                  "  xhttp.send(msg);\n" \
+                  "};\n";
                 content += "</script>\n";
                 content += "<body>\n";
                 content += "BKM-15R remote setup<br>\n";
@@ -1326,6 +1345,8 @@ void setupWifi( void * pvParameters ){
                 content += "<span>PSK:</span><input id='wifipsk' type='password'><br>\n";
                 content += "<button onclick='sendSetup()'>Send</button><br>\n";
                 content += "<p>Pressing 'Send' will save credentials, and restart...</p>\n";
+                content += "<button onclick='clearSetup()'>Clear</button><br>\n";
+                content += "<p>Pressing 'Clear' will erase known credentials</p>\n";
                 content += "</body>\n";
                 content += "</html>\n";
                 // send a standard http response header
@@ -1350,7 +1371,7 @@ void setupWifi( void * pvParameters ){
                   preferences.begin("credentials",false);
                   preferences.putString(KEY_SSID,ssid);
                   preferences.putString(KEY_PASSWORD,psk);
-                  preferences.end();                
+                  preferences.end();
                   delay(1000);
                   ESP.restart();
                 } else {
@@ -1358,7 +1379,15 @@ void setupWifi( void * pvParameters ){
                   setupClient.println("Content-Type: none");
                   setupClient.println("Connection: close");                
                 }
-              } else {
+              } else if (req.m_URL == "/clearcreds") {
+                setupClient.println("HTTP/1.1 200 OK");
+                setupClient.println("Content-Type: none");
+                setupClient.println("Connection: close");
+                preferences.begin("credentials",false);
+                preferences.remove(KEY_SSID);
+                preferences.remove(KEY_PASSWORD);
+                preferences.end();
+               } else {
                 setupClient.println("HTTP/1.1 404 Not Found");
                 setupClient.println("Connection: close");   
               }
@@ -1486,10 +1515,16 @@ void setup() {
       xTaskCreatePinnedToCore(wifiConnectionHandler, "Wifi Connection", 1000, NULL, 3, &wifiConnectionTask, 0);
     } else {
       Serial.println("Starting Setup Access Point:");
+      WiFi.mode(WIFI_OFF);
+      delay(1000);
+      WiFi.mode(WIFI_AP);
+      delay(1000);
       Serial.print("Config: ");    
       Serial.println(WiFi.softAPConfig(ap_ip, ap_gw, ap_subnet) ? "OK" : "Failed!");
+      delay(1000);
       Serial.print("Startup: ");    
       Serial.println(WiFi.softAP("BKM-15R-Setup", "adminadmin", 6, false) ? "OK" : "Failed!");
+      delay(1000);
       Serial.print("AP IP address: ");
       Serial.println(WiFi.softAPIP());
       Serial.print("MAC: ");
