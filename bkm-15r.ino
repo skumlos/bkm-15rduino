@@ -67,6 +67,22 @@
 #define LED                 (2)  // Status LED
 #define DISABLE_WIFI        (17) // Disable WiFi
 
+//#define SWAP_INPUTS // Needed for early boards... Kept for ease...
+
+#ifdef SWAP_INPUTS
+#define INPUT_KEY_0         (34)
+#define INPUT_KEY_1         (13)
+#define INPUT_KEY_2         (12)
+#define INPUT_KEY_3         (14)
+#define INPUT_KEY_4         (27)
+#define INPUT_KEY_5         (26)
+#define INPUT_KEY_6         (25)
+#define INPUT_KEY_7         (33)
+#define INPUT_KEY_8         (32)
+#define INPUT_KEY_9         (35)
+#define INPUT_KEY_ENT       (39)
+#define INPUT_KEY_DEL       (36)
+#else
 #define INPUT_KEY_0         (34)
 #define INPUT_KEY_1         (14)
 #define INPUT_KEY_2         (12)
@@ -79,6 +95,7 @@
 #define INPUT_KEY_9         (33)
 #define INPUT_KEY_ENT       (36)
 #define INPUT_KEY_DEL       (39)
+#endif
 
 #define NAV_KEY_UP          (4)
 #define NAV_KEY_DOWN        (22)
